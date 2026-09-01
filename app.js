@@ -245,10 +245,19 @@ function setupLyrics(iss, tickBeat) {
   els.lines.replaceChildren();
   if (!iss) return;
 
+  // The four credit fields almost never hold credits: across the whole known
+  // corpus they are either the field labels left untouched or one ISS tool's
+  // default handles, and not one of them ever matches the artist named in the
+  // song's own title. Showing them would be inventing an attribution.
+  // See docs/FILE_FORMATS.en.md section 4.1.
+  const PLACEHOLDER_CREDITS = new Set([
+    "WRITER", "COMPOSER", "SINGER", "EDITOR",
+    "LeeYS", "MunBK", "KimTH", "Solgher", "Damul", "Salmosa",
+  ]);
   const credits = [
     ["작사", iss.writer], ["작곡", iss.composer],
     ["노래", iss.singer], ["제작", iss.editor],
-  ].filter(([, v]) => v && v.trim() && !/^[A-Z]+$/.test(v.trim()));
+  ].filter(([, v]) => v && v.trim() && !PLACEHOLDER_CREDITS.has(v.trim()));
   els.credits.replaceChildren(...credits.map(([k, v]) => {
     const span = document.createElement("span");
     span.append(`${k} `);
