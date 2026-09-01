@@ -1250,6 +1250,37 @@ function parseIss(data, options) {
   return iss;
 }
 
+/**
+ * Resolve each ISS cue into the span of cells that should be coloured when it
+ * is current. Returns an array parallel to `iss.cues`, each `{line, from, to}`
+ * in character cells.
+ *
+ * A cue is not the highlight -- it is the *right edge* of it. The coloured
+ * region runs from the leftmost column the line has reached so far up to
+ * `startX + widthX`, and moving to another line starts over. Reading each cue
+ * as its own isolated run instead lights one syllable at a time, which is not
+ * what these files describe.
+ *
+ * On an ordinary lyric line the cues tile the text left to right -- the gap
+ * between one cue's end and the next cue's start is 0 in 168 527 corpus cases
+ * and 1 (a space) in 75 582 -- so the region grows a syllable at a time and
+ * the effect is the familiar karaoke wipe. The idiom also gets used for
+ * animation: a banner line whose right edge runs out and back reads as a
+ * volume meter, and 168 corpus lines carry more than sixty cues doing exactly
+ * that.
+ */
+function resolveIssSpans(iss) {
+  const out = [];
+  let line = -1;
+  let origin = 0;
+  for (const cue of iss.cues) {
+    if (cue.line !== line) { line = cue.line; origin = cue.startX; }
+    else if (cue.startX < origin) origin = cue.startX;
+    out.push({ line, from: origin, to: cue.startX + cue.widthX });
+  }
+  return out;
+}
+
 /** Sniff a dropped file by content, since extensions are not always right. */
 function identify(data) {
   const b = asBytes(data);
@@ -1800,6 +1831,7 @@ function rolSequence(song, resolve) {
 
 
 
+
 /**
  * A loaded song, ready to render.
  *
@@ -1964,16 +1996,23 @@ class IyagiMusic {
     return out;
   }
 
-  /** The lyric line that should be highlighted at the current tick, if any. */
+  /**
+   * The lyric span that should be coloured at the current tick, if any:
+   * `{line, text, from, to}` with `from`/`to` in character cells. See
+   * `resolveIssSpans` -- a cue marks the right edge of the highlight, not an
+   * isolated run.
+   */
   lyricAt(tick = this.tick) {
     if (!this.lyrics) return null;
-    let hit = null;
-    for (const cue of this.lyrics.cues) {
-      if (cue.tick > tick) break;
-      hit = cue;
+    this.lyricSpans ??= resolveIssSpans(this.lyrics);
+    let index = -1;
+    for (let i = 0; i < this.lyrics.cues.length; i++) {
+      if (this.lyrics.cues[i].tick > tick) break;
+      index = i;
     }
-    if (!hit) return null;
-    return { ...hit, text: this.lyrics.lines[hit.line] ?? "" };
+    if (index < 0) return null;
+    const span = this.lyricSpans[index];
+    return { ...span, text: this.lyrics.lines[span.line] ?? "" };
   }
 }
 

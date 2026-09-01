@@ -1,7 +1,7 @@
 // The page. Everything that makes sound happens in the worklet; this file
 // reads files, keeps the UI honest, and lines the lyrics up with the playhead.
 
-import { identify, parseIms, parseRol, deltaGcd } from "./lib/player.js";
+import { identify, resolveIssSpans } from "./lib/player.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -274,7 +274,7 @@ function setupLyrics(iss, tickBeat) {
     return div;
   });
   els.lines.replaceChildren(...nodes);
-  lyricState = { iss, nodes, tickBeat, cue: -1 };
+  lyricState = { iss, nodes, tickBeat, cue: -1, spans: resolveIssSpans(iss) };
   els.lyrics.hidden = false;
   // Lay out first, then park on the opening line: before the first cue there
   // is nothing "current", and a lyric sitting at the top of the window reads
@@ -297,24 +297,25 @@ function updateLyrics(tick) {
   if (index === lyricState.cue) return;
   lyricState.cue = index;
   if (index < 0) return;
-  const cue = iss.cues[index];
-  const line = nodes[cue.line];
+  const span = lyricState.spans[index];
+  const line = nodes[span.line];
   if (!line) return;
 
   for (const n of nodes) {
     if (n.classList.contains("on")) n.textContent = n.dataset.text ?? n.textContent;
     n.classList.remove("on", "near");
   }
-  const text = iss.lines[cue.line] ?? "";
+  const text = iss.lines[span.line] ?? "";
   line.dataset.text = text || " ";
   line.classList.add("on");
   // The neighbours stay legible but recede, which is what makes the middle
   // read as "now" without needing any other marker.
-  for (const offset of [-2, -1, 1, 2]) nodes[cue.line + offset]?.classList.add("near");
+  for (const offset of [-2, -1, 1, 2]) nodes[span.line + offset]?.classList.add("near");
 
-  // Colour the run of cells the file asks for, in characters.
-  const from = cellToIndex(text, cue.startX);
-  const to = cellToIndex(text, cue.startX + cue.widthX);
+  // The span already accounts for everything coloured so far on this line;
+  // convert its cell columns to character indices.
+  const from = cellToIndex(text, span.from);
+  const to = cellToIndex(text, span.to);
   line.replaceChildren(
     document.createTextNode(text.slice(0, from)),
     Object.assign(document.createElement("mark"), { textContent: text.slice(from, to) }),
