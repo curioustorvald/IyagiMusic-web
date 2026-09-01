@@ -9,7 +9,39 @@ const els = {
   title: $("title"), meta: $("meta"), warn: $("warn"),
   play: $("play"), stop: $("stop"), loop: $("loop"), gain: $("gain"),
   clock: $("clock"), lyrics: $("lyrics"), credits: $("credits"), lines: $("lines"),
+  view: $("view"), follow: $("follow"),
 };
+
+/**
+ * Auto-follow keeps the sung line in the middle of the window, but it must
+ * yield the moment the reader takes hold of the scroller -- otherwise every
+ * cue yanks the view back and browsing the lyric is impossible. It comes back
+ * on its own after a quiet spell, or immediately from the button.
+ */
+const FOLLOW_RESUME_MS = 6000;
+let following = true;
+let followTimer = 0;
+
+const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+function setFollowing(on) {
+  following = on;
+  els.follow.hidden = on;
+  clearTimeout(followTimer);
+  if (!on) followTimer = setTimeout(() => setFollowing(true), FOLLOW_RESUME_MS);
+  if (on && lyricState) centreLine(activeLineNode() ?? lyricState.nodes[0]);
+}
+
+const activeLineNode = () => els.lines.querySelector(".line.on");
+
+/** Half the window, so even the first and last lines can reach the middle. */
+function sizeLyricPadding() {
+  if (!els.view) return;
+  const line = els.lines.firstElementChild;
+  const lineHeight = line ? line.offsetHeight : 0;
+  els.lines.style.setProperty("--pad",
+    `${Math.max(0, (els.view.clientHeight - lineHeight) / 2)}px`);
+}
 
 let ctx = null;
 let node = null;
@@ -235,6 +267,14 @@ function setupLyrics(iss, tickBeat) {
   els.lines.replaceChildren(...nodes);
   lyricState = { iss, nodes, tickBeat, cue: -1 };
   els.lyrics.hidden = false;
+  // Lay out first, then park on the opening line: before the first cue there
+  // is nothing "current", and a lyric sitting at the top of the window reads
+  // as broken rather than as not-started-yet.
+  requestAnimationFrame(() => {
+    sizeLyricPadding();
+    setFollowing(true);
+    centreLine(nodes[0]);
+  });
 }
 
 function updateLyrics(tick) {
@@ -271,14 +311,14 @@ function updateLyrics(tick) {
     Object.assign(document.createElement("mark"), { textContent: text.slice(from, to) }),
     document.createTextNode(text.slice(to)),
   );
-  centreLine(line);
+  if (following) centreLine(line);
 }
 
-/** Slide the track so `line` sits in the middle of the fixed window. */
+/** Scroll so `line` sits in the middle of the window. */
 function centreLine(line) {
-  const view = els.lines.parentElement;
-  const shift = view.clientHeight / 2 - (line.offsetTop + line.offsetHeight / 2);
-  els.lines.style.transform = `translateY(${Math.round(shift)}px)`;
+  if (!line) return;
+  const target = line.offsetTop + line.offsetHeight / 2 - els.view.clientHeight / 2;
+  els.view.scrollTo({ top: Math.max(0, target), behavior: reduceMotion ? "auto" : "smooth" });
 }
 
 // ── controls ──────────────────────────────────────────────────────────────
@@ -303,6 +343,18 @@ els.loop.addEventListener("change", () =>
   node?.port.postMessage({ type: "loop", value: els.loop.checked }));
 els.gain.addEventListener("input", () =>
   node?.port.postMessage({ type: "gain", value: Number(els.gain.value) / 100 }));
+
+for (const type of ["wheel", "touchmove", "pointerdown"]) {
+  els.view.addEventListener(type, () => setFollowing(false), { passive: true });
+}
+els.view.addEventListener("keydown", (e) => {
+  if (/^(Arrow|Page|Home|End)/.test(e.key)) setFollowing(false);
+});
+els.follow.addEventListener("click", () => setFollowing(true));
+window.addEventListener("resize", () => {
+  sizeLyricPadding();
+  if (following) centreLine(activeLineNode() ?? lyricState?.nodes[0]);
+});
 
 els.pick.addEventListener("click", (e) => { e.stopPropagation(); els.files.click(); });
 els.drop.addEventListener("click", () => els.files.click());
