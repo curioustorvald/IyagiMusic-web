@@ -1,13 +1,22 @@
+/* Microtone's DIM theme: a neutral grey ground with the slate/blue cast
+   dropped, so it reads as plain grey rather than as a lighter dark theme.
+   The greys, the ink ramp and the amber are Microtone's own values; the key
+   colour stays mint, which holds 6.1:1 on the panel and 10.6:1 under the
+   black button label. */
 :root {
-  --bg: #0e1014;
-  --panel: #171b22;
-  --panel-2: #1e242e;
-  --line: #2b3340;
-  --ink: #dfe5ee;
-  --dim: #8b95a5;
+  --bg: #2f3136;
+  --panel: #3a3d45;
+  --panel-2: #444753;
+  --line: #565b62;
+  --ink: #e8e9ec;
+  --ink-2: #bcc1cb;
+  --dim: #a4aab5;
+  --recede: #868c97;        /* a step below --dim: a mid grey eats inactive ink */
   --accent: #7fd1c1;
-  --accent-2: #f0b46a;
-  --warn: #e08a7a;
+  --accent-ink: #16181d;    /* Microtone's dark ground, under the key colour */
+  --accent-2: #ffc043;
+  --warn: #ffb0b0;
+  --warn-bg: #6b3838;
   --mono: ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", monospace;
   --sans: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
 }
@@ -67,7 +76,8 @@ main {
 code {
   font-family: var(--mono);
   font-size: .88em;
-  background: #0000004d;
+  color: var(--ink-2);
+  background: #00000026;
   border: 1px solid var(--line);
   border-radius: 4px;
   padding: .05em .35em;
@@ -86,7 +96,7 @@ button {
 }
 button:hover:not(:disabled) { border-color: var(--accent); }
 button:disabled { opacity: .4; cursor: default; }
-button.primary { background: var(--accent); color: #0d1116; border-color: var(--accent); font-weight: 600; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
 button.primary:hover:not(:disabled) { filter: brightness(1.1); }
 
 /* ── song panel ──────────────────────────────────────────────────────── */
@@ -116,7 +126,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   margin: .9rem 0 0;
   padding: .6rem .8rem;
   border-left: 3px solid var(--warn);
-  background: #e08a7a14;
+  background: var(--warn-bg);
   color: var(--warn);
   font-size: .86rem;
   border-radius: 0 6px 6px 0;
@@ -130,7 +140,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   padding: .9rem 1.25rem;
   border-top: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  background: #0000001f;
+  background: #00000021;
 }
 .toggle, .vol { font-size: .86rem; color: var(--dim); display: flex; align-items: center; gap: .4rem; }
 .vol input { width: 6rem; accent-color: var(--accent); }
@@ -179,15 +189,15 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   background: var(--panel-2);
   border-color: var(--accent);
   color: var(--accent);
-  box-shadow: 0 2px 10px #0006;
+  box-shadow: 0 2px 10px #00000059;
 }
 .lines .line {
   white-space: pre-wrap;
-  color: #5d6675;
-  transition: color .25s, opacity .25s;
+  color: var(--recede);
+  transition: color .25s;
 }
 .lines .line.on { color: var(--ink); }
-.lines .line.near { color: #96a1b2; }
+.lines .line.near { color: var(--ink-2); }
 .lines .line mark { background: none; color: var(--accent-2); }
 
 @media (prefers-reduced-motion: reduce) {
@@ -202,7 +212,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   padding: 1rem 1.25rem;
   border: 1px solid var(--line);
   border-radius: 10px;
-  background: linear-gradient(100deg, #1d2a33, #171b22 60%);
+  background: linear-gradient(100deg, #3d4a4c, var(--panel) 60%);
   color: inherit;
   text-decoration: none;
   transition: border-color .15s, transform .15s;
@@ -215,7 +225,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   display: grid; place-items: center;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: #0000002e;
+  background: #00000029;
   flex: none;
 }
 .remix-text { display: flex; flex-direction: column; }
@@ -225,6 +235,7 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
 /* ── about ───────────────────────────────────────────────────────────── */
 .about { color: var(--dim); font-size: .9rem; }
 .about h3 { color: var(--ink); font-size: 1rem; margin: 0 0 .6rem; }
+.about code { color: var(--dim); }
 .about p { margin: 0 0 .8rem; }
 .about b, .about strong { color: var(--ink); }
 .bank-note { border-left: 3px solid var(--line); padding-left: .8rem; }
