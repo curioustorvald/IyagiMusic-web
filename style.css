@@ -375,6 +375,9 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   transition: border-color .15s, transform .15s;
 }
 .remix:hover { border-color: var(--accent); transform: translateY(-1px); }
+/* Before a song is open the banner is still a link to Microtone, just not yet
+   a handoff -- so it sits back rather than promising something it cannot do. */
+.remix-idle { opacity: .72; }
 .remix-mark {
   font-size: 1.4rem;
   color: var(--accent);

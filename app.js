@@ -13,6 +13,7 @@ const els = {
   view: $("view"), follow: $("follow"),
   scope: $("scope"), scopeToggle: $("scope-toggle"),
   meters: $("meters"), chipFlags: $("chipflags"),
+  remix: $("remix"), remixNote: $("remix-note"),
 };
 
 /**
@@ -67,6 +68,8 @@ let ctx = null;
 let node = null;
 let playing = false;
 let lyricState = null;
+/** The song currently loaded, kept for the handoff below. */
+let loaded = null;
 
 /**
  * The bundled general bank, fetched once and only when a song first needs it.
@@ -190,6 +193,11 @@ async function load(fileList) {
   els.stage.dataset.songName = found.songName;
   els.stage.dataset.bankName = found.bankName;
   els.stage.dataset.fallbackName = found.fallbackName ?? "";
+  // Keep the bytes: the remix button hands the very same pair to Microtone,
+  // so the listener never has to save a file and find it again.
+  loaded = { name: found.songName || "song.ims", song: found.song,
+             bank: found.bank, bankName: found.bankName };
+  els.remix?.classList.remove("remix-idle");
 }
 
 function showError(message) {
@@ -338,10 +346,14 @@ function updateLyrics(tick) {
   // convert its cell columns to character indices.
   const from = cellToIndex(text, span.from);
   const to = cellToIndex(text, span.to);
+  // Empty lines render as a single space so they keep their height; slice
+  // that placeholder rather than `text` itself, or an empty line would go
+  // content-less (and collapse) the moment it becomes the active line.
+  const display = text || " ";
   line.replaceChildren(
-    document.createTextNode(text.slice(0, from)),
-    Object.assign(document.createElement("mark"), { textContent: text.slice(from, to) }),
-    document.createTextNode(text.slice(to)),
+    document.createTextNode(display.slice(0, from)),
+    Object.assign(document.createElement("mark"), { textContent: display.slice(from, to) }),
+    document.createTextNode(display.slice(to)),
   );
   if (following) centreLine(line);
 }
@@ -410,3 +422,87 @@ els.drop.addEventListener("drop", (e) => {
 });
 window.addEventListener("dragover", (e) => e.preventDefault());
 window.addEventListener("drop", (e) => e.preventDefault());
+
+
+// ── "remix this in Microtone" ─────────────────────────────────────────────
+//
+// Microtone (microtone.cc) is a tracker that runs in the browser and imports
+// .ims files. Sending the listener off with a download would mean saving a
+// file, finding it, and dropping it back in -- and for this format, doing that
+// TWICE, because a song without its instrument bank makes no sound. So the song
+// travels in the link: gzipped, base64url, in the URL FRAGMENT, which no server
+// ever sees and no cross-origin policy can get in the way of. Across the whole
+// reference corpus that is a median 9.5 kB of URL and a worst case of 52 kB.
+//
+// The receiving half is Microtone's src/ui/handoff.js; the envelope below is
+// the same twelve lines written the other way round.
+
+const MICROTONE_URL = "https://microtone.cc/";
+const HANDOFF_PREFIX = "#import=";
+const HANDOFF_MAGIC = [0x4d, 0x54, 0x48, 0x31];   // "MTH1"
+const HANDOFF_GZIP = 1;
+/** Past this the URL stops being a sane way to move a file. */
+const HANDOFF_MAX = 1_500_000;
+
+function handoffField(parts, name, bytes) {
+  const n = new TextEncoder().encode(name).subarray(0, 255);
+  parts.push(Uint8Array.of(n.length), n);
+  const len = bytes ? bytes.length : 0;
+  parts.push(Uint8Array.of(len & 0xff, (len >> 8) & 0xff, (len >> 16) & 0xff, (len >>> 24) & 0xff));
+  if (bytes) parts.push(bytes);
+}
+
+function toBase64Url(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  }
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/** gzip, where the browser has it; the flag byte says which way it went. */
+async function maybeGzip(bytes) {
+  if (typeof CompressionStream !== "function") return { bytes, gzipped: false };
+  try {
+    const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream("gzip"));
+    const packed = new Uint8Array(await new Response(stream).arrayBuffer());
+    return packed.length < bytes.length ? { bytes: packed, gzipped: true } : { bytes, gzipped: false };
+  } catch {
+    return { bytes, gzipped: false };
+  }
+}
+
+async function handoffUrl(song) {
+  const parts = [];
+  handoffField(parts, song.name, song.song);
+  handoffField(parts, song.bank ? (song.bankName || "bank.bnk") : "", song.bank ?? null);
+  const inner = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { inner.set(p, o); o += p.length; }
+  const { bytes, gzipped } = await maybeGzip(inner);
+  const out = new Uint8Array(5 + bytes.length);
+  out.set(HANDOFF_MAGIC, 0);
+  out[4] = gzipped ? HANDOFF_GZIP : 0;
+  out.set(bytes, 5);
+  return MICROTONE_URL + HANDOFF_PREFIX + toBase64Url(out);
+}
+
+function remixNote(text) {
+  if (els.remixNote) els.remixNote.textContent = text;
+}
+
+els.remix?.addEventListener("click", (e) => {
+  if (!loaded) return;                       // no song yet: plain link, plain tab
+  e.preventDefault();
+  remixNote("Microtone로 보낼 준비 중…");
+  handoffUrl(loaded).then((url) => {
+    if (url.length > HANDOFF_MAX) {
+      remixNote("곡이 너무 커서 링크로 넘길 수 없습니다. 파일을 직접 넣어 주세요.");
+      return;
+    }
+    window.open(url, "_blank", "noopener");
+    remixNote("Microtone에서 열었습니다.");
+  }).catch(() => {
+    remixNote("곡을 넘기지 못했습니다. 파일을 직접 넣어 주세요.");
+  });
+});
