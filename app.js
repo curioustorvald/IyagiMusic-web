@@ -2,6 +2,7 @@
 // reads files, keeps the UI honest, and lines the lyrics up with the playhead.
 
 import { identify, resolveIssSpans } from "./lib/player.js";
+import { createVisualiser } from "./visualiser.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -10,6 +11,8 @@ const els = {
   play: $("play"), stop: $("stop"), loop: $("loop"), gain: $("gain"),
   clock: $("clock"), lyrics: $("lyrics"), credits: $("credits"), lines: $("lines"),
   view: $("view"), follow: $("follow"),
+  scope: $("scope"), scopeToggle: $("scope-toggle"),
+  meters: $("meters"), chipFlags: $("chipflags"),
 };
 
 /**
@@ -23,6 +26,23 @@ let following = true;
 let followTimer = 0;
 
 const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+/**
+ * The chip's own status, one column per voice. Eleven bars moving at 60 Hz is
+ * exactly the kind of thing someone asks the browser to stop doing, so a
+ * reader who has asked for less motion gets the panel folded away rather than
+ * a stilled version of it.
+ */
+const scope = createVisualiser(els.meters, els.chipFlags);
+function setScopeOpen(open) {
+  els.scope.toggleAttribute("data-collapsed", !open);
+  els.scopeToggle.setAttribute("aria-expanded", String(open));
+  els.scopeToggle.textContent = open ? "숨기기" : "보이기";
+  scope.setActive(open);
+}
+els.scopeToggle.addEventListener("click", () =>
+  setScopeOpen(els.scope.hasAttribute("data-collapsed")));
+setScopeOpen(!reduceMotion);
 
 function setFollowing(on) {
   following = on;
@@ -86,6 +106,7 @@ function onWorkletMessage(msg) {
     case "position":
       els.clock.textContent = formatTime(msg.seconds);
       updateLyrics(msg.tick);
+      scope.push(msg);
       break;
     case "ended":
       setPlaying(false);
@@ -153,6 +174,7 @@ async function load(fileList) {
   await ensureAudio();
   await ctx.resume();
   setPlaying(false);
+  scope.clear();
   node.port.postMessage({
     type: "load",
     song: found.song,

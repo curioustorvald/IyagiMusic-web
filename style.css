@@ -1,3 +1,5 @@
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css");
+
 /* Microtone's DIM theme: a neutral grey ground with the slate/blue cast
    dropped, so it reads as plain grey rather than as a lighter dark theme.
    The greys, the ink ramp and the amber are Microtone's own values; the key
@@ -18,7 +20,7 @@
   --warn: #ffb0b0;
   --warn-bg: #6b3838;
   --mono: ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", monospace;
-  --sans: "Pretendard", "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  --sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
 }
 
 * { box-sizing: border-box; }
@@ -204,6 +206,161 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   .lines-inner { transition: none; }
 }
 
+/* ── chip meters ─────────────────────────────────────────────────────── */
+/* One column per voice, which is the only picture this chip can honestly
+   sit for: it hands over one mono stream and nine voices' worth of state,
+   and never anything resembling a spectrum. The wide bar is what the voice
+   actually put on the mix bus; the thin one beside it is how hard its
+   modulator is driving it, which is where an FM voice's colour comes from. */
+
+@property --v {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
+.scope {
+  padding: .9rem 1.25rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+}
+.scope-head {
+  display: flex;
+  align-items: center;
+  gap: .45rem;
+  flex-wrap: wrap;
+  margin-bottom: .85rem;
+}
+.scope-head h3 { margin: 0; font-size: .92rem; font-weight: 600; }
+.scope[data-collapsed] .scope-body { display: none; }
+
+.chips { display: flex; gap: .3rem; flex-wrap: wrap; }
+.chip {
+  font-family: var(--mono);
+  font-size: .67rem;
+  padding: .08rem .45rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #00000021;
+  color: var(--recede);
+  white-space: nowrap;
+  transition: color .2s, border-color .2s;
+}
+.chip.lit { color: var(--accent); border-color: #7fd1c159; }
+
+.ghost {
+  margin-left: auto;
+  padding: .22rem .6rem;
+  font-size: .76rem;
+  color: var(--dim);
+  background: transparent;
+}
+
+.meters {
+  display: flex;
+  gap: .3rem;
+  overflow-x: auto;
+  padding-bottom: .25rem;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+.ch {
+  flex: 1 1 0;
+  min-width: 2.7rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: .3rem;
+}
+.ch-bars {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
+  height: 6.4rem;
+  width: 100%;
+}
+
+.bar {
+  position: relative;
+  border-radius: 2px;
+  background: #00000042;
+  box-shadow: inset 0 0 0 1px #00000029;
+  overflow: hidden;
+}
+.bar.out { width: 58%; max-width: 1.4rem; }
+.bar.mod { width: 20%; max-width: .4rem; }
+
+.bar .fill {
+  position: absolute;
+  inset: 0;
+  /* Clipping keeps the gradient still while the level moves; scaling it would
+     drag the amber up and down with the bar. */
+  clip-path: inset(calc(100% - var(--v) * 100%) 0 0 0);
+}
+.bar.out .fill {
+  background: linear-gradient(to top,
+    var(--accent) 0%, var(--accent) 46%, var(--accent-2) 78%, #ff9d7a 100%);
+}
+.bar.mod .fill {
+  background: linear-gradient(to top, var(--recede) 0%, var(--ink-2) 100%);
+}
+/* The LED ladder, laid over lit and unlit alike so the rungs line up. */
+.bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(to top, transparent 0 3px, #00000099 3px 5px);
+  pointer-events: none;
+}
+/* The peak that hangs behind the level, and fades out as it reaches the floor. */
+.bar .cap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  bottom: calc(var(--v) * (100% - 2px));
+  background: var(--ink);
+  opacity: clamp(0, calc(var(--v) * 9), .85);
+}
+
+/* A voice the song has not asked for yet. */
+.ch.idle .bar { opacity: .45; }
+.ch.idle .ch-name, .ch.idle .ch-note, .ch.idle .ch-patch { opacity: .5; }
+
+.ch-name {
+  font-family: var(--mono);
+  font-size: .7rem;
+  line-height: 1.35;
+  color: var(--recede);
+  border-radius: 3px;
+  padding: 0 .25rem;
+  transition: color .12s, background .12s;
+}
+.ch.on .ch-name { color: var(--accent-ink); background: var(--accent); }
+.ch-note {
+  font-family: var(--mono);
+  font-size: .72rem;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+.ch.on .ch-note { color: var(--ink); }
+.ch-patch {
+  max-width: 100%;
+  font-family: var(--mono);
+  font-size: .6rem;
+  line-height: 1.2;
+  color: var(--recede);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scope-note { margin: .9rem 0 0; font-size: .78rem; color: var(--dim); text-align: justify; }
+
+@media (prefers-reduced-motion: reduce) {
+  .chip, .ch-name { transition: none; }
+}
+
 /* ── remix banner ────────────────────────────────────────────────────── */
 .remix {
   display: flex;
@@ -236,11 +393,14 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
 .about { color: var(--dim); font-size: .9rem; }
 .about h3 { color: var(--ink); font-size: 1rem; margin: 0 0 .6rem; }
 .about code { color: var(--dim); }
-.about p { margin: 0 0 .8rem; }
+.about p { margin: 0 0 .8rem; text-align: justify; }
 .about b, .about strong { color: var(--ink); }
 .bank-note { border-left: 3px solid var(--line); padding-left: .8rem; }
 .links a { color: var(--accent); }
 
 @media (max-width: 30rem) {
   .clock { margin-left: 0; width: 100%; }
+  /* Keep the fold-away button beside the heading and let the status chips
+     take the line below, rather than stacking all three. */
+  .chips { order: 3; flex-basis: 100%; }
 }

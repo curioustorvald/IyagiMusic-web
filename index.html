@@ -19,7 +19,7 @@
       <p class="drop-title">파일을 여기에 끌어다 놓으세요</p>
       <p class="drop-hint">
         <code>.ims</code> <code>.rol</code> 음악 파일 하나면 됩니다.
-        곡 전용 <code>.bnk</code> 음색 뱅크와 가사 <code>.iss</code>가 있으면
+        곡 전용 <code>.bnk</code> 음색 뱅크와 <code>.iss</code> 가사가 있으면
         함께 놓으세요.
       </p>
       <button type="button" id="pick">파일 고르기</button>
@@ -41,6 +41,25 @@
       <label class="vol">음량 <input type="range" id="gain" min="0" max="100" value="70"></label>
       <span id="clock" class="clock">0:00</span>
     </div>
+
+    <section id="scope" class="scope" aria-label="음원 상태">
+      <div class="scope-head">
+        <h3>음원 상태</h3>
+        <div id="chipflags" class="chips"></div>
+        <button type="button" id="scope-toggle" class="ghost"
+                aria-expanded="true" aria-controls="scope-body">숨기기</button>
+      </div>
+      <div id="scope-body" class="scope-body">
+        <div id="meters" class="meters"></div>
+        <p class="scope-note">
+          성부마다 기둥이 하나씩 섭니다. 넓은 막대는 그 성부에서 실제로 나온
+          소리의 크기, 옆의 가는 막대는 그 소리를 흔드는 변조기의 세기입니다.
+          OPL2는 스펙트럼을 내놓는 물건이 아니라 성부 아홉 개를 FM으로 울리는
+          물건이라, 주파수 막대그래프 대신 그 아홉(리듬 모드에서는 6+5) 성부가
+          지금 무엇을 어떻게 울리고 있는지를 보여 줍니다.
+        </p>
+      </div>
+    </section>
 
     <div id="lyrics" class="lyrics" hidden>
       <div id="credits" class="credits"></div>
@@ -81,7 +100,7 @@
       거기에 없는 음색만 내장 뱅크에서 찾습니다.
     </p>
     <p class="links">
-      <a href="https://github.com/curioustorvald/IyagiMusic.js">소스와 포맷 문서</a>
+      <a href="https://github.com/curioustorvald/IyagiMusic.js">소스와 포맷 명세 보기</a>
     </p>
   </section>
 </main>
