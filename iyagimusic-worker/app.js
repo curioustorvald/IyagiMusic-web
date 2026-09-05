@@ -250,13 +250,30 @@ const formatTime = (s) =>
 
 // ── lyrics ────────────────────────────────────────────────────────────────
 
-/** East-Asian wide characters take two cells, which is what ISS counts in. */
-const isWide = (ch) => {
-  const c = ch.codePointAt(0);
-  return (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf) ||
-    (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) ||
-    (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6);
-};
+/**
+ * Two cells or one, which is what ISS counts in.
+ *
+ * This was a table of East-Asian-Width ranges, and it was the wrong question.
+ * These lines are not arbitrary Unicode -- they came out of `decodeJohab`, one
+ * character per Johab code, and the DOS screen the records were written
+ * against drew a one-byte code in one cell and a two-byte code in two.  Width
+ * belongs to the *bytes*, and no two-byte code decodes below U+0080, so the
+ * code point alone recovers it.
+ *
+ * The table called 470 assigned codes narrow: the KS X 1001 symbol rows below
+ * U+2E80 (`·` `◁` `▒` `☆` `―`), and Greek and Cyrillic, which are East-Asian
+ * *Ambiguous*.  It also caught the middle dot the library substitutes for
+ * Iyagi's own font glyphs and the U+FFFD it falls back to -- both stand in for
+ * a two-byte code and inherit its two cells.  Any of them on a line dragged
+ * every later highlight left, in 567 of the 696 corpus files.
+ *
+ * Counting cells is not rendering them: this does not ask the browser to give
+ * `·` two columns, only to mark the characters the record actually names.
+ *
+ * TWIN of `isWide` in iss-studio's `src/cells.js`.  Change one, change the
+ * other, or the studio starts agreeing with a displayer that no longer exists.
+ */
+const isWide = (ch) => ch.codePointAt(0) >= 0x80;
 
 /** Map a cell offset to a character index within a line. */
 function cellToIndex(text, cell) {
