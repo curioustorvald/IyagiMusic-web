@@ -262,10 +262,9 @@ const formatTime = (s) =>
  *
  * The table called 470 assigned codes narrow: the KS X 1001 symbol rows below
  * U+2E80 (`·` `◁` `▒` `☆` `―`), and Greek and Cyrillic, which are East-Asian
- * *Ambiguous*.  It also caught the middle dot the library substitutes for
- * Iyagi's own font glyphs and the U+FFFD it falls back to -- both stand in for
- * a two-byte code and inherit its two cells.  Any of them on a line dragged
- * every later highlight left, in 567 of the 696 corpus files.
+ * *Ambiguous*.  It also caught the U+FFFD the library falls back to, which
+ * stands in for a two-byte code and inherits its two cells.  Any of them on a
+ * line dragged every later highlight left, in 567 of the 696 corpus files.
  *
  * Counting cells is not rendering them: this does not ask the browser to give
  * `·` two columns, only to mark the characters the record actually names.
@@ -275,10 +274,17 @@ const formatTime = (s) =>
  */
 const isWide = (ch) => ch.codePointAt(0) >= 0x80;
 
-/** Map a cell offset to a character index within a line. */
+/**
+ * Map a cell offset to a character index within a line.
+ *
+ * Steps by code point, not by UTF-16 unit.  Two of Iyagi's own font glyphs
+ * decode above the BMP -- the 하늘소 ox and the bubble -- and a surrogate pair
+ * is one character from one two-byte code, so it is two cells, not four, and
+ * an index may never land between its halves.
+ */
 function cellToIndex(text, cell) {
   let cells = 0;
-  for (let i = 0; i < text.length; i++) {
+  for (let i = 0; i < text.length; i += text.codePointAt(i) > 0xffff ? 2 : 1) {
     if (cells >= cell) return i;
     cells += isWide(text[i]) ? 2 : 1;
   }
