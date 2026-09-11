@@ -194,13 +194,23 @@ button.primary:hover:not(:disabled) { filter: brightness(1.1); }
   box-shadow: 0 2px 10px #00000059;
 }
 .lines .line {
-  white-space: pre-wrap;
+  word-break: break-all;
   color: var(--recede);
   transition: color .25s;
 }
 .lines .line.on { color: var(--ink); }
 .lines .line.near { color: var(--ink-2); }
-.lines .line mark { background: none; color: var(--accent-2); }
+/* One span per character (`buildLineCells` in app.js), pinned to the DOS
+   screen's own column count -- 1ch or 2ch by `isWide` -- rather than to
+   whatever width the browser's CJK fallback font would otherwise pick. */
+.lines .line .cell {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: top;
+}
+.lines .line .cell.w1 { width: 1ch; }
+.lines .line .cell.w2 { width: 2ch; }
+.lines .line .cell.mark { color: var(--accent-2); }
 
 @media (prefers-reduced-motion: reduce) {
   .lines-inner { transition: none; }

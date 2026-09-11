@@ -266,13 +266,34 @@ const formatTime = (s) =>
  * stands in for a two-byte code and inherits its two cells.  Any of them on a
  * line dragged every later highlight left, in 567 of the 696 corpus files.
  *
- * Counting cells is not rendering them: this does not ask the browser to give
- * `·` two columns, only to mark the characters the record actually names.
+ * Lines are laid out one cell span per character (see `buildLineCells`), each
+ * pinned to 1ch or 2ch by this same test -- so `·` gets the two columns the
+ * record names even where a browser's own font metrics would call it narrow.
  *
  * TWIN of `isWide` in iss-studio's `src/cells.js`.  Change one, change the
  * other, or the studio starts agreeing with a displayer that no longer exists.
  */
 const isWide = (ch) => ch.codePointAt(0) >= 0x80;
+
+/**
+ * Split a line into one span per character, each classed `w1`/`w2` by
+ * `isWide` so the DOS screen's fixed columns survive browser rendering.
+ * Steps by code point: a surrogate pair is one character from one two-byte
+ * Johab code, so it becomes one span, not two.
+ */
+function buildLineCells(text) {
+  const cells = [];
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < text.length; i += text.codePointAt(i) > 0xffff ? 2 : 1) {
+    const span = document.createElement("span");
+    span.className = isWide(text[i]) ? "cell w2" : "cell w1";
+    span.textContent = String.fromCodePoint(text.codePointAt(i));
+    span.dataset.start = i;
+    frag.appendChild(span);
+    cells.push(span);
+  }
+  return { frag, cells };
+}
 
 /**
  * Map a cell offset to a character index within a line.
@@ -323,7 +344,9 @@ function setupLyrics(iss, tickBeat) {
   const nodes = iss.lines.map((text) => {
     const div = document.createElement("div");
     div.className = "line";
-    div.textContent = text || " ";
+    const { frag, cells } = buildLineCells(text || " ");
+    div.append(frag);
+    div.cells = cells;
     return div;
   });
   els.lines.replaceChildren(...nodes);
@@ -355,29 +378,25 @@ function updateLyrics(tick) {
   if (!line) return;
 
   for (const n of nodes) {
-    if (n.classList.contains("on")) n.textContent = n.dataset.text ?? n.textContent;
+    if (n.classList.contains("on")) for (const cell of n.cells) cell.classList.remove("mark");
     n.classList.remove("on", "near");
   }
-  const text = iss.lines[span.line] ?? "";
-  line.dataset.text = text || " ";
   line.classList.add("on");
   // The neighbours stay legible but recede, which is what makes the middle
   // read as "now" without needing any other marker.
   for (const offset of [-2, -1, 1, 2]) nodes[span.line + offset]?.classList.add("near");
 
   // The span already accounts for everything coloured so far on this line;
-  // convert its cell columns to character indices.
+  // convert its cell columns to character indices, then mark the cells
+  // (built by `buildLineCells`, each tagged with its own start index) that
+  // fall in that range.
+  const text = iss.lines[span.line] ?? "";
   const from = cellToIndex(text, span.from);
   const to = cellToIndex(text, span.to);
-  // Empty lines render as a single space so they keep their height; slice
-  // that placeholder rather than `text` itself, or an empty line would go
-  // content-less (and collapse) the moment it becomes the active line.
-  const display = text || " ";
-  line.replaceChildren(
-    document.createTextNode(display.slice(0, from)),
-    Object.assign(document.createElement("mark"), { textContent: display.slice(from, to) }),
-    document.createTextNode(display.slice(to)),
-  );
+  for (const cell of line.cells) {
+    const start = Number(cell.dataset.start);
+    cell.classList.toggle("mark", start >= from && start < to);
+  }
   if (following) centreLine(line);
 }
 
