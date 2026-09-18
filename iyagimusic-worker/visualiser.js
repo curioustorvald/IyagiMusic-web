@@ -1,17 +1,24 @@
 // The chip's own status, drawn as one moving column per voice.
 //
 // A twenty-band spectrum analyser would be a costume here. Nothing in this
-// player ever computes a spectrum -- the OPL2 hands over one mono stream and
+// player ever computes a spectrum -- the chip hands over its output and
 // nothing else -- so a row of bands would be a picture of an FFT we would have
-// to invent, of a chip that has nine voices rather than twenty bands. What the
-// chip does know is what each voice is doing, so that is what these columns
-// show: how loud the voice actually came out, how hard its modulator is
-// driving it, and what note it is holding.
+// to invent, of a chip that has voices rather than bands. What the chip does
+// know is what each voice is doing, so that is what these columns show: how
+// loud the voice actually came out, how hard its modulator is driving it, what
+// note it is holding, and -- on an OPL3 -- which way it is panned.
+//
+// The column count comes from the worklet rather than from a constant here,
+// because it is 9, 11, 18 or 20 depending on the chip and the mode. Only one
+// rule is assumed, and the chip guarantees it: **the five rhythm voices are
+// always the last five columns.**
 
 import {
   METER_STRIDE, M_PEAK, M_MOD_DB, M_NOTE, M_KEY_ON, M_STATE, M_VOLUME, M_TIMBRE,
-  T_CAR_WAVE, T_MOD_WAVE, T_ADDITIVE, T_FEEDBACK,
-  CF_RHYTHM, CF_TREMOLO, CF_VIBRATO, CF_WAVESEL,
+  M_PAN, PAN_LEFT, PAN_RIGHT, PAN_CENTRE,
+  T_CAR_WAVE, T_MOD_WAVE, T_ADDITIVE, T_FEEDBACK, T_FOUROP, T_CONN2, T_WAVE_MASK,
+  RHYTHM_VOICES,
+  CF_RHYTHM, CF_TREMOLO, CF_VIBRATO, CF_WAVESEL, CF_OPL3, CF_FOUROP,
 } from "./lib/player.js";
 
 /**
@@ -33,9 +40,19 @@ const DRUM_NAMES = ["BD", "SD", "TOM", "TC", "HH"];
 const DRUM_TITLES = ["베이스 드럼", "스네어 드럼", "톰톰", "탑 심벌", "하이햇"];
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
-/** OPL2's four waveforms, in register order: 0xE0 selects between these. */
-const WAVE_NAMES = ["사인", "반파", "전파", "펄스"];
+/**
+ * The eight waveforms, in register order: 0xE0 selects between these. The
+ * first four are the OPL2's; the last four need an OPL3 with NEW set, so on a
+ * YM3812 only the first four ever appear.
+ */
+const WAVE_NAMES = ["사인", "반파", "전파", "펄스", "배속 사인", "배속 전파", "사각", "톱니"];
 const EG_NAMES = ["꺼짐", "어택", "디케이", "서스테인", "릴리스"];
+/** §11: the 0xC0 stereo switches, which are enables rather than a pan knob. */
+const PAN_NAMES = { [PAN_LEFT]: "왼쪽", [PAN_RIGHT]: "오른쪽", [PAN_CENTRE]: "가운데" };
+/** §10: the four-operator connections, by the two channels' CNT bits. */
+const FOUROP_NAMES = [
+  "1→2→3→4", "1→2→3, 4", "1, 2→3→4", "1, 2→3, 4",
+];
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -83,20 +100,30 @@ export function createVisualiser(root, flags) {
   let lastFrame = 0;
 
   const chips = {
+    chip: el("span", "chip lit"),
     mode: el("span", "chip lit"),
     tremolo: el("span", "chip", "트레몰로"),
     vibrato: el("span", "chip", "비브라토"),
     wave: el("span", "chip", "파형 선택"),
+    fourOp: el("span", "chip", "4연산자"),
   };
-  flags.replaceChildren(chips.mode, chips.tremolo, chips.vibrato, chips.wave);
+  chips.fourOp.hidden = true;
+  flags.replaceChildren(chips.chip, chips.mode, chips.tremolo, chips.vibrato,
+    chips.wave, chips.fourOp);
+
+  /** The row the drums start on: the chip puts them last, whatever it is. */
+  function drumBase(count, isRhythm) {
+    return isRhythm ? count - RHYTHM_VOICES : count;
+  }
 
   function buildColumns(count, isRhythm) {
     voices = count;
     rhythm = isRhythm;
     columns = [];
     const made = [];
+    const drums = drumBase(count, isRhythm);
     for (let v = 0; v < count; v++) {
-      const drum = isRhythm && v >= 6;
+      const drum = v >= drums;
       const column = el("div", "ch idle");
       const bars = el("div", "ch-bars");
       const out = el("span", "bar out");
@@ -107,7 +134,7 @@ export function createVisualiser(root, flags) {
       const modFill = el("i", "fill");
       mod.append(modFill);
       bars.append(out, mod);
-      const name = el("span", "ch-name", drum ? DRUM_NAMES[v - 6] : String(v + 1));
+      const name = el("span", "ch-name", drum ? DRUM_NAMES[v - drums] : String(v + 1));
       // The detail is written when the pointer arrives rather than every
       // frame: half of it -- volume, envelope phase -- moves with the music.
       column.addEventListener("pointerenter", () => {
@@ -115,12 +142,22 @@ export function createVisualiser(root, flags) {
       });
       const note = el("span", "ch-note", "—");
       const patch = el("span", "ch-patch", "—");
-      column.append(bars, name, note, patch);
+      // The pan markers sit either side of the name, on the side the sound
+      // actually goes to, so that a glance down the row reads as a stereo
+      // picture rather than as a column of symbols to decode. They are only
+      // lit when a voice is panned; a centred voice shows neither. Both stay
+      // in the layout while unlit (the CSS hides them with `visibility`), so
+      // the lit name does not jump sideways when the panning moves.
+      const panLeft = el("span", "ch-pan left", "◄");
+      const panRight = el("span", "ch-pan right", "►");
+      const label = el("span", "ch-label");
+      label.append(panLeft, name, panRight);
+      column.append(bars, label, note, patch);
       made.push(column);
       columns.push({
-        column, outFill, cap, modFill, note, patch, drum,
+        column, outFill, cap, modFill, note, patch, panLeft, panRight, drum,
         level: 0, capLevel: 0, capAt: 0, shownLevel: -1, shownCap: -1, shownMod: -1,
-        shownNote: "—", shownPatch: "—", keyOn: false, used: false,
+        shownNote: "—", shownPatch: "—", shownPan: -1, keyOn: false, used: false,
       });
     }
     root.replaceChildren(...made);
@@ -130,14 +167,17 @@ export function createVisualiser(root, flags) {
   function tooltip(index) {
     const row = meter.subarray(index * METER_STRIDE, (index + 1) * METER_STRIDE);
     const timbre = row[M_TIMBRE] | 0;
-    const carWave = (timbre >> T_CAR_WAVE) & 3;
-    const modWave = (timbre >> T_MOD_WAVE) & 3;
+    const carWave = (timbre >> T_CAR_WAVE) & T_WAVE_MASK;
+    const modWave = (timbre >> T_MOD_WAVE) & T_WAVE_MASK;
     const additive = (timbre >> T_ADDITIVE) & 1;
     const feedback = (timbre >> T_FEEDBACK) & 7;
+    const fourOp = (timbre >> T_FOUROP) & 1;
+    const conn2 = (timbre >> T_CONN2) & 1;
     const single = row[M_MOD_DB] < 0;
-    const head = rhythm && index >= 6
-      ? `${DRUM_NAMES[index - 6]} — ${DRUM_TITLES[index - 6]}`
-      : `${index + 1}번 성부`;
+    const drums = drumBase(voices, rhythm);
+    const head = index >= drums
+      ? `${DRUM_NAMES[index - drums]} — ${DRUM_TITLES[index - drums]}`
+      : `${index + 1}번 성부${fourOp ? " (4연산자)" : ""}`;
     const lines = [
       head,
       `음색  ${patchNames[index] || "—"}`,
@@ -147,8 +187,13 @@ export function createVisualiser(root, flags) {
         ? `파형  ${WAVE_NAMES[carWave]} (연산자 1개)`
         : `파형  변조기 ${WAVE_NAMES[modWave]} → 반송파 ${WAVE_NAMES[carWave]}`,
     ];
-    if (!single) {
+    if (fourOp) {
+      lines.push(`결합  ${FOUROP_NAMES[(additive << 1) | conn2]}, 되먹임 ${feedback}`);
+    } else if (!single) {
       lines.push(`결합  ${additive ? "가산 (AM)" : "변조 (FM)"}, 되먹임 ${feedback}`);
+    }
+    if (chipFlags & CF_OPL3) {
+      lines.push(`정위  ${PAN_NAMES[row[M_PAN] | 0] ?? "없음"}`);
     }
     return lines.join("\n");
   }
@@ -205,6 +250,14 @@ export function createVisualiser(root, flags) {
       if (fresh) {
         const note = noteName(meter[o + M_NOTE]);
         if (note !== c.shownNote) { c.shownNote = note; c.note.textContent = note; }
+        // The stereo switches move a handful of times a song at most, so this
+        // costs nothing and saves a reader guessing why one side is louder.
+        const pan = meter[o + M_PAN] | 0;
+        if (pan !== c.shownPan) {
+          c.shownPan = pan;
+          c.panLeft.classList.toggle("lit", pan === PAN_LEFT);
+          c.panRight.classList.toggle("lit", pan === PAN_RIGHT);
+        }
       }
     }
     if (!fresh && !moving) { running = false; return; }
@@ -231,10 +284,18 @@ export function createVisualiser(root, flags) {
   }
 
   function refreshChips() {
-    chips.mode.textContent = rhythm ? "리듬 6+5성부" : "멜로디 9성부";
+    const opl3 = (chipFlags & CF_OPL3) !== 0;
+    chips.chip.textContent = opl3 ? "OPL3 (YMF262)" : "OPL2 (YM3812)";
+    chips.mode.textContent = rhythm
+      ? `리듬 ${voices - RHYTHM_VOICES}+${RHYTHM_VOICES}성부`
+      : `멜로디 ${voices}성부`;
     chips.tremolo.classList.toggle("lit", (chipFlags & CF_TREMOLO) !== 0);
     chips.vibrato.classList.toggle("lit", (chipFlags & CF_VIBRATO) !== 0);
-    chips.wave.classList.toggle("lit", (chipFlags & CF_WAVESEL) !== 0);
+    // On an OPL3 the wave-select switch is gone: all eight waveforms are
+    // always reachable, so the chip stays lit rather than reporting 0x01.
+    chips.wave.classList.toggle("lit", opl3 || (chipFlags & CF_WAVESEL) !== 0);
+    chips.fourOp.hidden = !opl3;
+    chips.fourOp.classList.toggle("lit", (chipFlags & CF_FOUROP) !== 0);
   }
 
   return {
@@ -244,13 +305,16 @@ export function createVisualiser(root, flags) {
       const isRhythm = (msg.chipFlags & CF_RHYTHM) !== 0;
       meter = msg.meter;
       meterAt = performance.now();
-      if (wanted !== voices || isRhythm !== rhythm) {
-        buildColumns(wanted, isRhythm);
-        refreshLabels();
+      const rebuilt = wanted !== voices || isRhythm !== rhythm;
+      if (rebuilt) buildColumns(wanted, isRhythm);
+      if (msg.chipFlags !== chipFlags || rebuilt) {
+        chipFlags = msg.chipFlags;
         refreshChips();
       }
-      if (msg.patchNames) { patchNames = msg.patchNames; refreshLabels(); }
-      if (msg.chipFlags !== chipFlags) { chipFlags = msg.chipFlags; refreshChips(); }
+      if (msg.patchNames || rebuilt) {
+        if (msg.patchNames) patchNames = msg.patchNames;
+        refreshLabels();
+      }
       run();
     },
 

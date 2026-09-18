@@ -1,4 +1,4 @@
-// GENERATED FILE -- do not edit. Rebuild with: node tools/build-pages.mjs
+// GENERATED FILE -- do not edit. Rebuild with: npm run build
 // Single-file concat of src/** for AudioWorklets, which cannot import modules.
 "use strict";
 
@@ -249,15 +249,21 @@ function johabCharFromCode(code) {
 }
 
 /**
+ * How to read bytes that are not plain Johab.
+ *
+ * @typedef {object} DecodeOptions
+ * @property {string} [replacement] stand-in for undecodable codes; default "�"
+ * @property {(code:number)=>(string|null)} [userGlyph] called for codes in
+ *   the user-defined area (0xD400-0xD8FF) ahead of the built-in mapping, for
+ *   callers that would rather keep those codes distinguishable than read them
+ * @property {boolean} [stopAtNul] stop at the first 0x00; default true
+ */
+
+/**
  * Decode a Johab byte string.
  *
  * @param {Uint8Array|number[]} bytes
- * @param {object} [options]
- * @param {string} [options.replacement="�"] stand-in for undecodable codes
- * @param {(code:number)=>(string|null)} [options.userGlyph] called for codes in
- *   the user-defined area (0xD400-0xD8FF) ahead of the built-in mapping, for
- *   callers that would rather keep those codes distinguishable than read them
- * @param {boolean} [options.stopAtNul=true] stop at the first 0x00
+ * @param {DecodeOptions} [options]
  * @returns {string}
  */
 function decodeJohab(bytes, options = {}) {
@@ -282,7 +288,12 @@ function decodeJohab(bytes, options = {}) {
   return out.join("");
 }
 
-/** Trim the trailing NULs and spaces of a fixed-width text field, then decode. */
+/**
+ * Trim the trailing NULs and spaces of a fixed-width text field, then decode.
+ * @param {Uint8Array} bytes
+ * @param {DecodeOptions} [options]
+ * @returns {string}
+ */
 function decodeJohabField(bytes, options) {
   let end = bytes.length;
   while (end > 0 && (bytes[end - 1] === 0x00 || bytes[end - 1] === 0x20)) end--;
@@ -335,17 +346,29 @@ const SEMITONES = 12;
 const SUBSTEPS = 16;
 
 // == src/opl/constants.js ==
-// OPL2 (YM3812) constants.
+// OPL2 (YM3812) and OPL3 (YMF262) constants.
 //
 // Everything here is either a hardware fact with a public citation or is
 // derived from one in this file, in the open. Nothing is carried over from
-// another emulator: see docs/OPL2_NOTES.en.md for what is measured, what is
-// derived and what is deliberately approximate.
+// another emulator: see docs/OPL2_NOTES.en.md and docs/OPL3_NOTES.en.md for
+// what is measured, what is derived and what is deliberately approximate.
+//
+// The two chips share this file because they share almost all of it. A YMF262
+// is a YM3812 twice over -- the same operator, the same envelope, the same
+// tables, the same nine-channel register bank -- plus a second bank, four more
+// waveforms, four-operator channels and a stereo switch. Only the things in
+// the OPL3 section below are new.
 
 /** Crystal on an AdLib / Sound Blaster card. */
 const CHIP_CLOCK_HZ = 3579545;
 
-/** The chip walks all 18 operators in 72 master clocks, one output sample. */
+/**
+ * The chip walks all 18 operators in 72 master clocks, one output sample.
+ *
+ * A YMF262 has 36 operators and a 14.318 MHz crystal -- four times the clock
+ * for twice the operators in 288 clocks -- so it lands on the same 49716 Hz
+ * sample rate, which is why an OPL3 plays OPL2 songs at the right pitch.
+ */
 const CLOCKS_PER_SAMPLE = 72;
 
 /** 49716.05 Hz. Every timing constant below is expressed against this. */
@@ -405,37 +428,119 @@ const RHYTHM_SD_OP = 20;    // channel 7 carrier
 const RHYTHM_TOM_OP = 18;   // channel 8 modulator
 const RHYTHM_TC_OP = 21;    // channel 8 carrier
 
+// ── OPL3 (YMF262) ─────────────────────────────────────────────────────────
+// The second half of the chip. Everything above still applies to it.
+
+/** Eighteen channels, thirty-six operators: the OPL2's nine, twice. */
+const OPL3_CHANNEL_COUNT = 18;
+const OPL3_OPERATOR_COUNT = 36;
+
+/**
+ * The second register bank sits at `reg | 0x100`, and holds a second copy of
+ * every per-channel and per-operator register. The chip-wide ones -- 0x01,
+ * 0x08, 0xBD -- exist only in bank 0.
+ */
+const BANK_STRIDE = 0x100;
+
+/**
+ * 0x105 bit 0 is NEW: the switch from OPL2 compatibility into OPL3 proper.
+ * With it clear a YMF262 is a YM3812 with a second bank it ignores -- nine
+ * channels, four waveforms, no stereo, no four-operator channels.
+ */
+const REG_OPL3_ENABLE = 0x105;
+const OPL3_NEW = 0x01;
+
+/**
+ * 0x104 bits 0..5 join six channel pairs into four-operator channels, one bit
+ * per pair, in the order of FOUROP_PAIRS below.
+ */
+const REG_FOUROP = 0x104;
+
+/**
+ * The six channel pairs that can be joined. Only these: a four-operator
+ * channel is built from a channel and the one three above it in the same
+ * bank, which is what puts its four operators on consecutive register offsets.
+ * `[head, slave]` -- the head is the channel the pair is addressed by.
+ */
+const FOUROP_PAIRS = Object.freeze([
+  Object.freeze([0, 3]), Object.freeze([1, 4]), Object.freeze([2, 5]),
+  Object.freeze([9, 12]), Object.freeze([10, 13]), Object.freeze([11, 14]),
+]);
+
+/**
+ * Register 0xC0 bits 4 and 5, the stereo switches. They are enables, not a
+ * pan: a channel is routed to the left output, the right, both or neither.
+ * Both is centre, and neither is silence -- which is where a YMF262 comes up
+ * after a reset, so a driver that never writes 0xC0 in OPL3 mode is mute.
+ */
+const PAN_NONE = 0, PAN_LEFT = 1, PAN_RIGHT = 2, PAN_CENTRE = 3;
+const PAN_SHIFT = 4;
+
 // ── Meter rows ────────────────────────────────────────────────────────────
 // What a display wants is one row per *voice*, which is not one row per
 // channel: in rhythm mode the chip's last three channels carry five
 // instruments between them. The rows are numbered the way the driver numbers
-// voices -- 0…8 melodic, or 0…5 plus bass drum, snare, tom, cymbal and hi-hat
-// -- so a caller can index a row with the same voice number it plays.
+// voices -- for an OPL2, 0…8 melodic, or 0…5 plus bass drum, snare, tom,
+// cymbal and hi-hat; for an OPL3, 0…17 melodic, or 0…14 plus the same five.
+// A caller can therefore index a row with the same voice number it plays.
+//
+// **The five rhythm rows are always the last five rows the chip has.** That is
+// the one rule a display needs: 6…10 of 11 on an OPL2, 15…19 of 20 on an
+// OPL3. `chip.rhythmRow` and `chip.voiceRows` say where they land.
 
-const METER_VOICES = 11;
-const METER_STRIDE = 7;
+/** Rows a meter buffer must hold: an OPL3 in rhythm mode, the widest case. */
+const METER_VOICES = 20;
+const METER_STRIDE = 8;
+
+/** How many voices the rhythm mode carries, on either chip. */
+const RHYTHM_VOICES = 5;
+
+/** The rhythm rows of an *OPL2*, which are its last five. */
 const METER_BD = 6, METER_SD = 7, METER_TOM = 8, METER_TC = 9, METER_HH = 10;
+
+/** Offsets of the five rhythm voices from a chip's `rhythmRow`. */
+const R_BD = 0, R_SD = 1, R_TOM = 2, R_TC = 3, R_HH = 4;
 
 /** Fields of one meter row. */
 const M_PEAK = 0;      // loudest |output| since the last read, ±1 scale
 const M_MOD_DB = 1;    // modulator attenuation in dB; -1 where there is none
 const M_NOTE = 2;      // MIDI note number, fractional; -1 where untuned
 const M_KEY_ON = 3;
-const M_STATE = 4;     // envelope phase of the voice's carrier
+const M_STATE = 4;     // envelope phase of the voice's output operator
 const M_VOLUME = 5;    // channel volume 0…127 -- the driver's, not the chip's
 const M_TIMBRE = 6;    // packed, by the shifts below
+const M_PAN = 7;       // the 0xC0 stereo switches, as the PAN_* values
 
-const T_CAR_WAVE = 0, T_MOD_WAVE = 2, T_ADDITIVE = 4, T_FEEDBACK = 5;
+/**
+ * Fields of M_TIMBRE. The two wave fields are three bits wide because an OPL3
+ * has eight waveforms; an OPL2 only ever fills the low two of each.
+ */
+const T_CAR_WAVE = 0, T_MOD_WAVE = 3, T_ADDITIVE = 6, T_FEEDBACK = 7,
+  T_FOUROP = 10, T_CONN2 = 11;
+const T_WAVE_MASK = 7, T_FEEDBACK_MASK = 7;
 
-/** Chip-wide status bits, as `OPL2.chipFlags` reports them. */
-const CF_RHYTHM = 1, CF_TREMOLO = 2, CF_VIBRATO = 4, CF_WAVESEL = 8;
+/**
+ * T_ADDITIVE and T_CONN2 are the two channels' CNT bits. On a two-operator
+ * voice only the first has meaning -- modulation or addition. On a
+ * four-operator voice the pair of them picks one of the four connections:
+ *
+ *   0,0   1 → 2 → 3 → 4          0,1   1 → 2 → 3, and 4
+ *   1,0   1, and 2 → 3 → 4       1,1   1, and 2 → 3, and 4
+ */
+
+/** Chip-wide status bits, as `chipFlags` reports them. */
+const CF_RHYTHM = 1, CF_TREMOLO = 2, CF_VIBRATO = 4, CF_WAVESEL = 8,
+  CF_OPL3 = 16, CF_FOUROP = 32;
 
 // == src/opl/tables.js ==
-// OPL2 lookup tables. All of them are computed here from their closed forms
-// rather than pasted in, so the derivation is the documentation. The two the
-// chip really does hold in ROM (log-sin, exp) come out bit-exact; the KSL
+// OPL2 and OPL3 lookup tables. All of them are computed here from their closed
+// forms rather than pasted in, so the derivation is the documentation. The two
+// the chip really does hold in ROM (log-sin, exp) come out bit-exact; the KSL
 // table is stated because three of its sixteen entries round differently from
 // the closed form, and the difference is 0.75 dB.
+//
+// The OPL3 adds no tables. Its four extra waveforms are the same quarter sine
+// read differently, and `waveform` below builds them out of LOG_SIN.
 
 
 /**
@@ -475,6 +580,7 @@ const EXP = (() => {
  * 4π — two whole cycles of a 1024-step phase — which only works out if full
  * scale is 4096.
  */
+/** @param {number} att @returns {number} */
 function expand(att) {
   if (att >= 0x1800) return 0;                 // past −96 dB, the chip gives up
   const frac = att & 0xff;
@@ -506,6 +612,7 @@ const KSL_ROM = Object.freeze([
 const KSL_SHIFT = Object.freeze([null, 1, 2, 0]);
 
 /** KSL attenuation in 0.75 dB units for a block/F-number, before the setting. */
+/** @param {number} block @param {number} fnum @returns {number} */
 function kslAttenuation(block, fnum) {
   const v = KSL_ROM[(fnum >> 6) & 15] - 8 * (7 - block);
   return v > 0 ? v : 0;
@@ -549,14 +656,35 @@ const EG_DUTY = Object.freeze([
  * Waveform lookup: turn a 10-bit phase into a log-domain attenuation and a
  * sign. Returns the attenuation; `outSign[0]` receives −1 or +1, and a
  * silenced quarter returns SILENCE.
+ *
+ * Shapes 0…3 are the OPL2's, selected by register 0xE0 once 0x01 bit 5 is set.
+ * Shapes 4…7 are the OPL3's four additions, which register 0xE0 can only reach
+ * once 0x105 bit 0 (NEW) is set. Every one of the eight is the same quarter
+ * sine read differently — the chip holds one table, not eight — so they are
+ * built here out of LOG_SIN rather than stated.
+ *
+ * The four new shapes, as the YMF262's published waveform figure draws them:
+ *
+ *   4  the sine at double rate, and silence through the second half
+ *   5  the same, rectified: two humps and then silence
+ *   6  a square wave — no attenuation at all, just the sine's sign
+ *   7  a logarithmic sawtooth: a straight line in the *attenuation* domain,
+ *      0 dB down to silence across each half cycle, sign alternating
+ *
+ * Shape 7 is the only one that is not a rearrangement of the sine, and its
+ * slope is fixed by the domain rather than chosen: a 9-bit ramp scaled by 8
+ * spans 0…0xFF8, which is the same 96 dB the envelope and the exponential
+ * table span. One half cycle is therefore exactly the chip's whole dynamic
+ * range, top to bottom.
  */
 const SILENCE = 0x1000;
 
+/** @param {number} shape @param {number} phase @param {number} outSign @returns {number} */
 function waveform(shape, phase, outSign) {
   const quarter = phase & 0xff;
   const mirrored = (phase & 0x100) !== 0 ? 255 - quarter : quarter;
   const negative = (phase & 0x200) !== 0;
-  switch (shape & 3) {
+  switch (shape & 7) {
     case 0:                                        // full sine
       outSign[0] = negative ? -1 : 1;
       return LOG_SIN[mirrored];
@@ -566,11 +694,41 @@ function waveform(shape, phase, outSign) {
     case 2:                                        // absolute sine
       outSign[0] = 1;
       return LOG_SIN[mirrored];
-    default:                                       // pulse sine: rising quarters
+    case 3:                                        // pulse sine: rising quarters
       outSign[0] = 1;
       return (phase & 0x100) !== 0 ? SILENCE : LOG_SIN[quarter];
+    case 4: {                                      // even sine: double rate, then silence
+      outSign[0] = 1;
+      if (negative) return SILENCE;
+      // The first half cycle is stretched over a whole one, sign and all.
+      const p = (phase << 1) & 0x3ff;
+      const q = p & 0xff;
+      outSign[0] = (p & 0x200) !== 0 ? -1 : 1;
+      return LOG_SIN[(p & 0x100) !== 0 ? 255 - q : q];
+    }
+    case 5: {                                      // even absolute sine
+      outSign[0] = 1;
+      if (negative) return SILENCE;
+      // As shape 4, but bit 9 -- the sign -- is dropped rather than read.
+      const p = (phase << 1) & 0x1ff;
+      const q = p & 0xff;
+      return LOG_SIN[(p & 0x100) !== 0 ? 255 - q : q];
+    }
+    case 6:                                        // square
+      outSign[0] = negative ? -1 : 1;
+      return 0;
+    default: {                                     // logarithmic sawtooth
+      outSign[0] = negative ? -1 : 1;
+      // Down across the first half, and back up across the second, so that the
+      // two halves meet at silence rather than at a step.
+      const ramp = phase & 0x1ff;
+      return (negative ? 0x1ff - ramp : ramp) << 3;
+    }
   }
 }
+
+/** How many waveforms register 0xE0 can select, by whether NEW is set. */
+const WAVE_MASK_OPL2 = 3, WAVE_MASK_OPL3 = 7;
 
 // ── Low-frequency oscillators ─────────────────────────────────────────────
 // Both are free-running and shared by every operator that opts in.
@@ -593,33 +751,48 @@ const TREMOLO_STEPS = Object.freeze(
 );
 
 /** Unit triangle, 0…1…0, for position p in [0, period). */
+/** @param {number} p @param {number} period @returns {number} */
 function triangle(p, period) {
   const half = period >> 1;
   return p < half ? p / half : 2 - p / half;
 }
 
 /** Clamp an envelope value into the 9-bit attenuation range. */
+/** @type {(v: number) => number} */
 const clampEnv = (v) => (v < 0 ? 0 : v > ENV_MAX ? ENV_MAX : v);
 
 // == src/opl/chip.js ==
-// OPL2 (YM3812) — register interface in, samples out.
+// OPL2 (YM3812) and OPL3 (YMF262) — register interface in, samples out.
 //
 // Written from public hardware documentation rather than from another
-// emulator; docs/OPL2_NOTES.en.md records what each part is derived from and
-// where it is knowingly an approximation. The shape follows Microtone's engine
-// modules: pure computation, no DOM and no Web Audio, a Float32 mix bus, and
-// a render loop that fills a caller-owned buffer.
+// emulator; docs/OPL2_NOTES.en.md and docs/OPL3_NOTES.en.md record what each
+// part is derived from and where it is knowingly an approximation. The shape
+// follows Microtone's engine modules: pure computation, no DOM and no Web
+// Audio, a Float32 mix bus, and a render loop that fills a caller-owned buffer.
+//
+// One core serves both chips, because a YMF262 *is* a YM3812 twice over. The
+// operator, the envelope, the tables, the rhythm generator and the nine-channel
+// register bank are the same silicon; the OPL3 adds a second bank of nine
+// channels, four more waveforms, six channel pairs that can be joined into
+// four-operator voices, and a stereo switch per channel. Every one of those is
+// gated on the NEW bit (register 0x105), which is what lets a YMF262 come up
+// pretending to be a YM3812 -- so an OPL2 is not a special case bolted on here,
+// it is the state this core is in before anything turns the extras on.
 
 
 
-/** Register offset → operator index. Sparse: 6, 7, 14, 15 are not operators. */
+/**
+ * Register offset → operator index *within one bank*. Sparse: 6, 7, 14 and 15
+ * are not operators. An OPL3's second bank repeats the same nineteen offsets
+ * at `reg | 0x100`, and its operators are these eighteen plus OPERATOR_COUNT.
+ */
 const OP_BY_OFFSET = (() => {
   const t = new Int8Array(32).fill(-1);
   OPERATOR_OFFSET.forEach((off, i) => { t[off] = i; });
   return t;
 })();
 
-/** Operator index → the channel it belongs to, in melodic mode. */
+/** Operator index → the channel it belongs to, within its bank. */
 const OP_CHANNEL = (() => {
   const t = new Uint8Array(OPERATOR_COUNT);
   for (let c = 0; c < CHANNEL_COUNT; c++) {
@@ -638,14 +811,30 @@ const OP_IS_CARRIER = (() => {
 
 const sign = [0];
 
-/** Nine channels into a 16-bit DAC: what `generate` divides its mix by. */
+/**
+ * Nine channels into a 16-bit DAC: what the render loop divides its mix by.
+ *
+ * The same figure serves both chips, because one OPL3 voice is exactly as loud
+ * as one OPL2 voice -- the per-channel DAC level is the same silicon. An OPL3
+ * song running twenty voices therefore reaches a larger number than an OPL2
+ * one running nine, which is a fact about the chip rather than a scaling
+ * mistake: a real YMF262 clips there too. Backing off is the player's job, and
+ * `IyagiMusic` picks its default gain by how many voices the song can reach.
+ */
 const MIX_SCALE = 16384;
+/** How many times a rhythm voice reaches the accumulator; see `#generateRhythm`. */
+const RHYTHM_MIX = 2;
+
+/** `Channel.pairRole`: not in a four-operator pair, the pair's head, its slave. */
+const PAIR_NONE = 0, PAIR_HEAD = 1, PAIR_SLAVE = 2;
 
 class Operator {
-  constructor(index) {
+  /** @param {number} index @param {number} bank */
+  constructor(index, bank) {
     this.index = index;
-    this.channel = OP_CHANNEL[index];
-    this.carrier = OP_IS_CARRIER[index] !== 0;
+    this.bank = bank;
+    this.channel = OP_CHANNEL[index % OPERATOR_COUNT] + bank * CHANNEL_COUNT;
+    this.carrier = OP_IS_CARRIER[index % OPERATOR_COUNT] !== 0;
     this.reset();
   }
 
@@ -662,24 +851,55 @@ class Operator {
 }
 
 class Channel {
+  /** @param {number} index */
   constructor(index) {
     this.index = index;
+    this.bank = index >= CHANNEL_COUNT ? 1 : 0;
     this.fnum = 0; this.block = 0; this.keyOn = false;
     this.feedback = 0; this.additive = false;
-    this.mod = null; this.car = null;
+    // OPL3 only, and both true until something says otherwise: a YM3812 has
+    // one output and routes every channel to it.
+    this.left = true; this.right = true;
+    /** @type {number} PAIR_NONE, PAIR_HEAD or PAIR_SLAVE. */
+    this.pairRole = PAIR_NONE;
+    /** @type {number} The pair's other channel, or -1. */
+    this.pairWith = -1;
+    // Wired up by the chip's constructor: a channel's two operators are not
+    // adjacent, and the map lives there.
+    /** @type {Operator|null} */ this.mod = null;
+    /** @type {Operator|null} */ this.car = null;
   }
 }
 
-class OPL2 {
-  constructor() {
+/**
+ * The shared core. `OPL2` and `OPL3` below are the two ways it is built; there
+ * is no third, and nothing outside this file constructs one directly.
+ */
+class OplChip {
+  /**
+   * @param {object} [opts]
+   * @param {boolean} [opts.opl3] whether the second bank and its extras exist
+   */
+  constructor(opts = {}) {
+    /** @type {boolean} Whether this is a YMF262 at all. */
+    this.opl3 = !!opts.opl3;
     this.sampleRate = NATIVE_RATE;
-    this.operators = Array.from({ length: OPERATOR_COUNT }, (_, i) => new Operator(i));
-    this.channels = Array.from({ length: CHANNEL_COUNT }, (_, i) => new Channel(i));
+    this.channelCount = this.opl3 ? OPL3_CHANNEL_COUNT : CHANNEL_COUNT;
+    this.operatorCount = this.channelCount * 2;
+    this.registerMask = this.opl3 ? 0x1ff : 0xff;
+
+    this.operators = Array.from({ length: this.operatorCount },
+      (_, i) => new Operator(i, i >= OPERATOR_COUNT ? 1 : 0));
+    this.channels = Array.from({ length: this.channelCount }, (_, i) => new Channel(i));
     for (const ch of this.channels) {
-      ch.mod = this.operators[OP_BY_OFFSET[CHANNEL_OP_OFFSET[ch.index]]];
-      ch.car = this.operators[OP_BY_OFFSET[CHANNEL_OP_OFFSET[ch.index] + 3]];
+      const local = ch.index % CHANNEL_COUNT;
+      const base = ch.bank * OPERATOR_COUNT;
+      ch.mod = this.operators[OP_BY_OFFSET[CHANNEL_OP_OFFSET[local]] + base];
+      ch.car = this.operators[OP_BY_OFFSET[CHANNEL_OP_OFFSET[local] + 3] + base];
     }
-    this.registers = new Uint8Array(256);
+    this.registers = new Uint8Array(this.opl3 ? 512 : 256);
+    /** @type {Int32Array} channel index → meter row, or -1 while it is not a voice. */
+    this.rowOfChannel = new Int32Array(this.channelCount);
     this.reset();
   }
 
@@ -688,78 +908,139 @@ class OPL2 {
     for (const op of this.operators) op.reset();
     for (const ch of this.channels) {
       ch.fnum = 0; ch.block = 0; ch.keyOn = false; ch.feedback = 0; ch.additive = false;
+      ch.left = true; ch.right = true;
+      ch.pairRole = PAIR_NONE; ch.pairWith = -1;
     }
     this.waveSelectEnabled = false;
     this.noteSelect = false;
     this.rhythmMode = false;
+    /** @type {number} */
     this.rhythmBits = 0;
     this.amDepth = 0;
     this.vibDepth = 0;
     this.egCounter = 0;
     this.lfoPhase = 0;
     this.noise = 1;
-    this.feedbackBuf = new Float64Array(CHANNEL_COUNT * 2);
+    /** @type {boolean} The NEW bit: everything the OPL3 adds hangs off it. */
+    this.newMode = false;
+    /** @type {number} Register 0x104: one bit per pair of FOUROP_PAIRS. */
+    this.fourOpBits = 0;
+    this.feedbackBuf = new Float64Array(this.channelCount * 2);
     // Loudest sample each voice has produced since a display last looked.
     this.peaks = new Float32Array(METER_VOICES);
+    this.#rebuildVoiceMap();
   }
 
-  /** Write one chip register. Unknown addresses are stored and ignored. */
+  /** How many channels are actually playing: nine, or eighteen in OPL3 mode. */
+  get activeChannels() {
+    return this.opl3 && this.newMode ? OPL3_CHANNEL_COUNT : CHANNEL_COUNT;
+  }
+
+  /** Waveforms register 0xE0 can currently reach: four, or eight in OPL3 mode. */
+  get waveMask() {
+    return this.opl3 && this.newMode ? WAVE_MASK_OPL3 : WAVE_MASK_OPL2;
+  }
+
+  /** Whether the chip's output is two channels rather than one. */
+  get stereo() { return this.opl3 && this.newMode; }
+
+  /**
+   * Write one chip register. Unknown addresses are stored and ignored.
+   *
+   * An OPL3 takes nine address bits rather than eight: `reg | 0x100` reaches
+   * the second bank, which holds a second copy of every per-channel and
+   * per-operator register. The chip-wide ones -- 0x01, 0x08, 0xBD -- live only
+   * in bank 0, and 0x104 and 0x105 only in bank 1.
+   *
+   * @param {number} reg @param {number} value
+   */
   write(reg, value) {
-    reg &= 0xff; value &= 0xff;
+    reg &= this.registerMask; value &= 0xff;
     this.registers[reg] = value;
+    const bank = reg >> 8;
+    const low = reg & 0xff;
     // Operator registers address an operator by the low FIVE bits -- offsets
     // run to 0x15 -- while channel registers use the low four. Masking both
     // the same way silently aliases the third bank of operators onto the first.
-    const group = reg & 0xe0;
-    const chanGroup = reg & 0xf0;
-    const opOffset = reg & 0x1f;
-    const chanIndex = reg & 0x0f;
+    const group = low & 0xe0;
+    const chanGroup = low & 0xf0;
+    const opOffset = low & 0x1f;
+    const chanIndex = (low & 0x0f) + bank * CHANNEL_COUNT;
 
-    if (reg === 0x01) { this.waveSelectEnabled = (value & 0x20) !== 0; return; }
-    if (reg === 0x08) { this.noteSelect = (value & 0x40) !== 0; this.#retuneAll(); return; }
-    if (reg === 0xbd) {
-      this.amDepth = (value >> 7) & 1;
-      this.vibDepth = (value >> 6) & 1;
-      const wasRhythm = this.rhythmMode;
-      this.rhythmMode = (value & 0x20) !== 0;
-      if (this.rhythmMode !== wasRhythm) this.rhythmBits = 0;
-      if (this.rhythmMode) this.#updateRhythm(value & 0x1f);
-      return;
+    if (bank === 1) {
+      if (low === (REG_FOUROP & 0xff)) {
+        this.fourOpBits = value & 0x3f;
+        this.#rebuildFourOp();
+        return;
+      }
+      if (low === (REG_OPL3_ENABLE & 0xff)) {
+        const on = (value & OPL3_NEW) !== 0;
+        if (on !== this.newMode) {
+          this.newMode = on;
+          // Waveform width, the second bank and the pairs all follow NEW, so
+          // everything derived from it has to be recomputed rather than
+          // waiting for the next write to each register.
+          this.#remaskWaves();
+          this.#rebuildFourOp();
+          this.#rebuildVoiceMap();
+        }
+        return;
+      }
+    } else {
+      if (low === 0x01) { this.waveSelectEnabled = (value & 0x20) !== 0; return; }
+      if (low === 0x08) { this.noteSelect = (value & 0x40) !== 0; this.#retuneAll(); return; }
+      if (low === 0xbd) {
+        this.amDepth = (value >> 7) & 1;
+        this.vibDepth = (value >> 6) & 1;
+        const wasRhythm = this.rhythmMode;
+        this.rhythmMode = (value & 0x20) !== 0;
+        if (this.rhythmMode !== wasRhythm) { this.rhythmBits = 0; this.#rebuildVoiceMap(); }
+        if (this.rhythmMode) this.#updateRhythm(value & 0x1f);
+        return;
+      }
     }
 
-    if (chanGroup === 0xa0 && chanIndex < CHANNEL_COUNT) {
+    if (chanGroup === 0xa0 && (low & 0x0f) < CHANNEL_COUNT) {
       const ch = this.channels[chanIndex];
+      if (!ch) return;
       ch.fnum = (ch.fnum & 0x300) | value;
       this.#retune(chanIndex);
       return;
     }
-    if (chanGroup === 0xb0 && chanIndex < CHANNEL_COUNT) {
+    if (chanGroup === 0xb0 && (low & 0x0f) < CHANNEL_COUNT) {
       const ch = this.channels[chanIndex];
+      if (!ch) return;
       ch.fnum = (ch.fnum & 0xff) | ((value & 3) << 8);
       ch.block = (value >> 2) & 7;
       const on = (value & 0x20) !== 0;
       this.#retune(chanIndex);
       if (on !== ch.keyOn) {
         ch.keyOn = on;
-        // In rhythm mode the two drum channels are keyed from 0xBD instead.
-        if (!(this.rhythmMode && chanIndex >= 6)) {
-          if (on) { this.#keyOn(ch.mod); this.#keyOn(ch.car); }
-          else { this.#keyOff(ch.mod); this.#keyOff(ch.car); }
-        }
+        // In rhythm mode the two drum channels are keyed from 0xBD instead,
+        // and the slave half of a four-operator pair is keyed by its head.
+        const drumChannel = this.rhythmMode && bank === 0 && (low & 0x0f) >= 6;
+        if (!drumChannel && ch.pairRole !== PAIR_SLAVE) this.#keyChannel(ch, on);
       }
       return;
     }
-    if (chanGroup === 0xc0 && chanIndex < CHANNEL_COUNT) {
+    if (chanGroup === 0xc0 && (low & 0x0f) < CHANNEL_COUNT) {
       const ch = this.channels[chanIndex];
+      if (!ch) return;
       ch.feedback = (value >> 1) & 7;
       ch.additive = (value & 1) !== 0;
+      // Bits 4 and 5 are the stereo switches. They do not exist on a YM3812,
+      // and a YMF262 ignores them until NEW is set -- which is the only reason
+      // an OPL2 song does not fall silent on an OPL3 the moment it writes 0xC0.
+      ch.left = (value & (1 << PAN_SHIFT)) !== 0;
+      ch.right = (value & (2 << PAN_SHIFT)) !== 0;
       return;
     }
 
     if (opOffset > 0x15) return;
-    const opIndex = OP_BY_OFFSET[opOffset];
-    if (opIndex < 0) return;
-    const op = this.operators[opIndex];
+    const localOp = OP_BY_OFFSET[opOffset];
+    if (localOp < 0) return;
+    const op = this.operators[localOp + bank * OPERATOR_COUNT];
+    if (!op) return;
     switch (group) {
       case 0x20:
         op.am = (value & 0x80) !== 0;
@@ -783,7 +1064,7 @@ class OPL2 {
         op.release = value & 0x0f;
         return;
       case 0xe0:
-        op.wave = value & 3;
+        op.wave = value & this.waveMask;
         return;
       default:
         return;
@@ -802,6 +1083,16 @@ class OPL2 {
     if (op.state !== EG_OFF) op.state = EG_RELEASE;
   }
 
+  /** Key a whole voice, which for a four-operator pair is four operators. */
+  #keyChannel(ch, on) {
+    const key = on ? (op) => this.#keyOn(op) : (op) => this.#keyOff(op);
+    key(ch.mod); key(ch.car);
+    if (ch.pairRole === PAIR_HEAD) {
+      const slave = this.channels[ch.pairWith];
+      key(slave.mod); key(slave.car);
+    }
+  }
+
   #updateRhythm(bits) {
     const changed = bits ^ this.rhythmBits;
     this.rhythmBits = bits;
@@ -818,20 +1109,81 @@ class OPL2 {
     }
   }
 
-  #retuneAll() { for (let c = 0; c < CHANNEL_COUNT; c++) this.#retune(c); }
+  /**
+   * Which channels are voices, and in what order a display should read them.
+   *
+   * This is the one piece of bookkeeping that differs between the two chips,
+   * and it is the same rule for both: the melodic channels in register order,
+   * minus the three the rhythm mode takes over, and then the five rhythm
+   * voices on the end. Nine channels give 9 rows, or 6 + 5; eighteen give 18,
+   * or 15 + 5. The rhythm voices are therefore always the last five rows,
+   * whichever chip this is.
+   */
+  #rebuildVoiceMap() {
+    const active = this.activeChannels;
+    const order = [];
+    for (let c = 0; c < (this.rhythmMode ? 6 : Math.min(CHANNEL_COUNT, active)); c++) {
+      order.push(c);
+    }
+    for (let c = CHANNEL_COUNT; c < active; c++) order.push(c);
+    /** @type {number[]} melodic channel indices, in meter-row order */
+    this.melodicOrder = order;
+    /** @type {number} how many meter rows this chip currently has */
+    this.voiceRows = order.length + (this.rhythmMode ? RHYTHM_VOICES : 0);
+    /** @type {number} the row the bass drum lands on, or -1 outside rhythm mode */
+    this.rhythmRow = this.rhythmMode ? order.length : -1;
+    this.rowOfChannel.fill(-1);
+    for (let i = 0; i < order.length; i++) this.rowOfChannel[order[i]] = i;
+  }
 
-  /** Recompute an operator's phase increment, KSL attenuation and KSR offset. */
+  /** Re-read register 0x104 into the channels' pair roles. */
+  #rebuildFourOp() {
+    for (const ch of this.channels) { ch.pairRole = PAIR_NONE; ch.pairWith = -1; }
+    if (this.opl3 && this.newMode) {
+      for (let i = 0; i < FOUROP_PAIRS.length; i++) {
+        if (!(this.fourOpBits & (1 << i))) continue;
+        const [head, slave] = FOUROP_PAIRS[i];
+        this.channels[head].pairRole = PAIR_HEAD;
+        this.channels[head].pairWith = slave;
+        this.channels[slave].pairRole = PAIR_SLAVE;
+        this.channels[slave].pairWith = head;
+      }
+    }
+    // A slave's operators take their pitch from the head, so joining or
+    // splitting a pair retunes four operators at once.
+    this.#retuneAll();
+  }
+
+  /** NEW widens register 0xE0 from two bits to three; narrowing it takes back. */
+  #remaskWaves() {
+    const mask = this.waveMask;
+    for (const op of this.operators) op.wave &= mask;
+  }
+
+  #retuneAll() { for (let c = 0; c < this.channelCount; c++) this.#retune(c); }
+
+  /**
+   * Recompute an operator's phase increment, KSL attenuation and KSR offset.
+   *
+   * A four-operator pair is one voice with one pitch: the slave half's own
+   * F-number and block are not read, and all four operators follow the head's.
+   * The driver writes the same F-number to both halves anyway, so the corpus
+   * cannot tell the two readings apart -- see docs/OPL3_NOTES.en.md.
+   */
   #retune(channelIndex) {
     const ch = this.channels[channelIndex];
-    const ksrValue = (ch.block << 1) |
-      ((ch.fnum >> (this.noteSelect ? 9 : 8)) & 1);
-    const kslBase = kslAttenuation(ch.block, ch.fnum);
+    if (!ch) return;
+    const tune = ch.pairRole === PAIR_SLAVE ? this.channels[ch.pairWith] : ch;
+    const ksrValue = (tune.block << 1) |
+      ((tune.fnum >> (this.noteSelect ? 9 : 8)) & 1);
+    const kslBase = kslAttenuation(tune.block, tune.fnum);
     for (const op of [ch.mod, ch.car]) {
-      op.phaseInc = ((ch.fnum * MULTIPLE_X2[op.multiple]) << ch.block) >> 1;
+      op.phaseInc = ((tune.fnum * MULTIPLE_X2[op.multiple]) << tune.block) >> 1;
       op.ksrOffset = op.ksr ? ksrValue : ksrValue >> 2;
       const shift = KSL_SHIFT[op.ksl];
       op.kslAtt = shift === null ? 0 : kslBase >> shift;
     }
+    if (ch.pairRole === PAIR_HEAD) this.#retune(ch.pairWith);
   }
 
   /**
@@ -946,10 +1298,115 @@ class OPL2 {
   }
 
   /**
+   * The phase modulation a channel's modulator feeds back into itself.
+   *
+   * The average of the last two outputs, scaled so that feedback 7 is the
+   * documented 4π of phase modulation at full amplitude. Note that this is a
+   * QUARTER of what the direct modulation path carries -- an operator reading
+   * another one gets its output whole (see `#twoOp`) -- which is the ordinary
+   * relationship on an FM chip: feedback is a fraction of full modulation.
+   * The two were equal here once, and that was the bug; see OPL2_NOTES.
+   */
+  #feedbackOf(ch) {
+    if (!ch.feedback) return 0;
+    return ((ch.mod.out + ch.mod.prev) / 2 / (1 << (8 - ch.feedback))) | 0;
+  }
+
+  /**
+   * One ordinary two-operator channel.
+   *
+   * The modulator's output goes into the carrier's phase WHOLE. A full-scale
+   * operator is ±4084 and a cycle of phase is 1024 units, so that is ±4 cycles
+   * of deviation -- twice what feedback 7 gives, which is the only figure the
+   * application manual states. Halving it here to match that figure is what
+   * made every FM patch dull, and it survived the ±2042 → ±4084 output-scale
+   * fix because the feedback anchor validates the other path; OPL2_NOTES has
+   * the measurement.
+   */
+  #twoOp(ch, tremolo, vibrato) {
+    this.#advanceEnvelope(ch.mod);
+    this.#advanceEnvelope(ch.car);
+    const m = this.#operate(ch.mod, this.#feedbackOf(ch), tremolo, vibrato);
+    return ch.additive
+      ? m + this.#operate(ch.car, 0, tremolo, vibrato)
+      : this.#operate(ch.car, m, tremolo, vibrato);
+  }
+
+  /**
+   * One four-operator voice: two channels' operators run as one chain.
+   *
+   * The two channels keep their own CNT bit in register 0xC0, and the four
+   * combinations are the four connections the YMF262's published figure draws.
+   * Reading CNT as "this half's first operator goes straight to the output
+   * instead of modulating" gives all four at once:
+   *
+   *   0,0   1 → 2 → 3 → 4          0,1   1 → 2 → 3, and 4
+   *   1,0   1, and 2 → 3 → 4       1,1   1, and 2 → 3, and 4
+   *
+   * Feedback belongs to operator 1 only. The slave half's own feedback setting
+   * has nowhere to act -- operator 3 is fed by the chain, not by itself -- so
+   * it is ignored, which is also what the register layout implies.
+   */
+  #fourOp(head, tremolo, vibrato) {
+    const slave = this.channels[head.pairWith];
+    const op1 = head.mod, op2 = head.car, op3 = slave.mod, op4 = slave.car;
+    this.#advanceEnvelope(op1); this.#advanceEnvelope(op2);
+    this.#advanceEnvelope(op3); this.#advanceEnvelope(op4);
+
+    const o1 = this.#operate(op1, this.#feedbackOf(head), tremolo, vibrato);
+    if (!head.additive) {
+      const o2 = this.#operate(op2, o1, tremolo, vibrato);
+      const o3 = this.#operate(op3, o2, tremolo, vibrato);
+      return slave.additive
+        ? o3 + this.#operate(op4, 0, tremolo, vibrato)
+        : this.#operate(op4, o3, tremolo, vibrato);
+    }
+    const o2 = this.#operate(op2, 0, tremolo, vibrato);
+    const o3 = this.#operate(op3, o2, tremolo, vibrato);
+    return slave.additive
+      ? o1 + o3 + this.#operate(op4, 0, tremolo, vibrato)
+      : o1 + this.#operate(op4, o3, tremolo, vibrato);
+  }
+
+  /**
    * Render `count` samples into `out` starting at `offset`, at the chip's
-   * native rate. Output is roughly ±1 after the /4096 scaling below.
+   * native rate, as one mono stream. Output is roughly ±1 after the scaling
+   * in `#render`.
+   *
+   * The stereo switches are ignored here rather than mixed down: a voice
+   * panned hard left belongs in a mono mix at its full level, which is also
+   * exactly what the same song does on a YM3812.
+   *
+   * @param {Float32Array} out @param {number} offset @param {number} count
    */
   generate(out, offset, count) {
+    this.#render(out, null, offset, count);
+  }
+
+  /**
+   * Render `count` samples as two channels. On a chip without the stereo
+   * switches this is the mono stream twice; on an OPL3 in OPL3 mode it is
+   * what register 0xC0 bits 4 and 5 ask for.
+   *
+   * @param {Float32Array} left @param {Float32Array} right
+   * @param {number} offset @param {number} count
+   */
+  generateStereo(left, right, offset, count) {
+    if (!this.stereo) {
+      this.#render(left, null, offset, count);
+      right.set(left.subarray(offset, offset + count), offset);
+      return;
+    }
+    this.#render(left, right, offset, count);
+  }
+
+  #busL = 0;
+  #busR = 0;
+
+  /** `right` null means one bus and no panning. */
+  #render(left, right, offset, count) {
+    const stereo = right !== null;
+    const order = this.melodicOrder;
     const chans = this.channels;
     for (let n = 0; n < count; n++) {
       const tremolo = TREMOLO_STEPS[this.amDepth] * ENV_TO_LOG *
@@ -958,34 +1415,44 @@ class OPL2 {
         (2 * triangle(this.lfoPhase % VIBRATO_PERIOD, VIBRATO_PERIOD) - 1);
       const vibrato = vibCents === 0 ? 1 : 2 ** (vibCents / 1200);
 
-      let mix = 0;
-      const melodicChannels = this.rhythmMode ? 6 : CHANNEL_COUNT;
-      for (let c = 0; c < melodicChannels; c++) {
-        const ch = chans[c];
-        this.#advanceEnvelope(ch.mod);
-        this.#advanceEnvelope(ch.car);
-        let fb = 0;
-        if (ch.feedback) {
-          // The average of the last two outputs, scaled so that feedback 7 is
-          // the documented 4π of phase modulation at full amplitude.
-          fb = (ch.mod.out + ch.mod.prev) / 2 / (1 << (8 - ch.feedback));
-        }
-        const m = this.#operate(ch.mod, fb | 0, tremolo, vibrato);
-        mix += this.#tally(c, ch.additive
-          ? m + this.#operate(ch.car, 0, tremolo, vibrato)
-          : this.#operate(ch.car, (m / 2) | 0, tremolo, vibrato));
+      this.#busL = 0;
+      this.#busR = 0;
+      for (let row = 0; row < order.length; row++) {
+        const ch = chans[order[row]];
+        // A pair's slave half has no output of its own: its two operators are
+        // read inside its head's chain, and its meter row stays at rest.
+        if (ch.pairRole === PAIR_SLAVE) continue;
+        this.#emit(row, ch, ch.pairRole === PAIR_HEAD
+          ? this.#fourOp(ch, tremolo, vibrato)
+          : this.#twoOp(ch, tremolo, vibrato), stereo);
       }
-      if (this.rhythmMode) mix += this.#generateRhythm(tremolo, vibrato);
+      if (this.rhythmMode) this.#generateRhythm(tremolo, vibrato, stereo);
 
-      // The chip sums nine channels into a 16-bit DAC; scale so that a single
-      // full-amplitude operator is about 0.5 and a full mix stays inside ±1.
-      out[offset + n] = Math.fround(mix / MIX_SCALE);
+      // The chip sums its channels into a 16-bit DAC; scale so that a single
+      // full-amplitude operator is about 0.5.
+      left[offset + n] = Math.fround(this.#busL / MIX_SCALE);
+      if (stereo) right[offset + n] = Math.fround(this.#busR / MIX_SCALE);
       this.egCounter = (this.egCounter + 1) >>> 0;
       this.lfoPhase = (this.lfoPhase + 1) >>> 0;
       // 23-bit LFSR, tapped at 22 and 8 — the chip's own noise for the drums.
       this.noise = ((this.noise >>> 1) |
         (((this.noise ^ (this.noise >>> 14)) & 1) << 22)) >>> 0;
     }
+  }
+
+  /**
+   * Note one voice's contribution to the mix, and route it.
+   *
+   * The peak runs on every voice of every sample whether or not anyone is
+   * watching, which costs a few per cent of the render; a flag to switch it
+   * off would only trade that for a display that can show stale silence.
+   */
+  #emit(row, ch, value, stereo) {
+    const level = value < 0 ? -value : value;
+    if (level > this.peaks[row]) this.peaks[row] = level;
+    if (!stereo) { this.#busL += value; return; }
+    if (ch.left) this.#busL += value;
+    if (ch.right) this.#busR += value;
   }
 
   /**
@@ -1011,26 +1478,46 @@ class OPL2 {
    * the die rather than from anyone's code -- see docs/OPL2_NOTES.en.md. The
    * application manual documents the drums only as tonal advice (§5-4) and
    * says nothing about how they are generated.
+   *
+   * An OPL3 puts them on the same three channels of the first bank, and its
+   * second bank has no rhythm mode of its own.
    */
-  #generateRhythm(tremolo, vibrato) {
+  /**
+   * The five rhythm voices, each summed into the bus TWICE.
+   *
+   * That doubling is a property of the chip rather than of any voice: in
+   * rhythm mode channels 6, 7 and 8 reach the accumulator twice over, so the
+   * drums sit 6 dB above where the same operators would sit on a melodic
+   * channel. It is reported, and reported as verified against a real YM3812,
+   * by every emulator that implements it -- but Yamaha's own manual documents
+   * the drums only as tonal advice (§5-4) and says nothing about the mix, so
+   * unlike the envelope clock there is no first-party table behind it. What
+   * decided it was listening: without it a rhythm-mode song is audibly mild,
+   * and every other candidate for that was measured and ruled out first.
+   *
+   * `value * 2` rather than two calls to `#emit` so that the per-voice meter
+   * reports the contribution the voice actually makes to the mix.
+   */
+  #generateRhythm(tremolo, vibrato, stereo) {
     const ops = this.operators;
     const ch6 = this.channels[6];
+    const ch7 = this.channels[7];
+    const ch8 = this.channels[8];
+    const base = this.rhythmRow;
     const hh = ops[OP_BY_OFFSET[RHYTHM_HH_OP]];
     const sd = ops[OP_BY_OFFSET[RHYTHM_SD_OP]];
     const tom = ops[OP_BY_OFFSET[RHYTHM_TOM_OP]];
     const tc = ops[OP_BY_OFFSET[RHYTHM_TC_OP]];
     for (const op of [ch6.mod, ch6.car, hh, sd, tom, tc]) this.#advanceEnvelope(op);
 
-    let mix = 0;
-    let fb = 0;
-    if (ch6.feedback) fb = (ch6.mod.out + ch6.mod.prev) / 2 / (1 << (8 - ch6.feedback));
-    const m = this.#operate(ch6.mod, fb | 0, tremolo, vibrato);
-    mix += this.#tally(METER_BD, ch6.additive
+    const m = this.#operate(ch6.mod, this.#feedbackOf(ch6), tremolo, vibrato);
+    this.#emit(base + R_BD, ch6, RHYTHM_MIX * (ch6.additive
       ? m + this.#operate(ch6.car, 0, tremolo, vibrato)
-      : this.#operate(ch6.car, (m / 2) | 0, tremolo, vibrato));
+      : this.#operate(ch6.car, m, tremolo, vibrato)), stereo);
 
     // Tom-tom is a plain sine on channel 9's frequency.
-    mix += this.#tally(METER_TOM, this.#operate(tom, 0, tremolo, vibrato));
+    this.#emit(base + R_TOM, ch8,
+      RHYTHM_MIX * this.#operate(tom, 0, tremolo, vibrato), stereo);
 
     // The remaining three read each other's accumulators, so every phase has
     // to be advanced before any of them is sampled.
@@ -1042,25 +1529,12 @@ class OPL2 {
     const noise = this.noise & 1;
     const xor = (((hp >> 2) ^ (hp >> 7)) | (hp >> 3) | ((tp >> 5) ^ (tp >> 3))) & 1;
 
-    mix += this.#tally(METER_HH,
-      this.#rhythmOperator(hh, (xor << 9) | (xor ^ noise ? 0x0d0 : 0x034), tremolo));
-    mix += this.#tally(METER_SD,
-      this.#rhythmOperator(sd, (((hp >> 8) & 1) ? 0x200 : 0x100) ^ (noise << 8), tremolo));
-    mix += this.#tally(METER_TC,
-      this.#rhythmOperator(tc, (xor << 9) | 0x100, tremolo));
-    return mix;
-  }
-
-  /**
-   * Note one voice's contribution to the mix, and pass it through. This runs
-   * on every voice of every sample whether or not anyone is watching, which
-   * costs a few per cent of the render; a flag to switch it off would only
-   * trade that for a display that can show stale silence.
-   */
-  #tally(voice, value) {
-    const level = value < 0 ? -value : value;
-    if (level > this.peaks[voice]) this.peaks[voice] = level;
-    return value;
+    this.#emit(base + R_HH, ch7, RHYTHM_MIX *
+      this.#rhythmOperator(hh, (xor << 9) | (xor ^ noise ? 0x0d0 : 0x034), tremolo), stereo);
+    this.#emit(base + R_SD, ch7, RHYTHM_MIX *
+      this.#rhythmOperator(sd, (((hp >> 8) & 1) ? 0x200 : 0x100) ^ (noise << 8), tremolo), stereo);
+    this.#emit(base + R_TC, ch8, RHYTHM_MIX *
+      this.#rhythmOperator(tc, (xor << 9) | 0x100, tremolo), stereo);
   }
 
   /** A single-operator drum: the phase is dictated, not accumulated freely. */
@@ -1077,12 +1551,14 @@ class OPL2 {
   // ── What the chip looks like from outside ──────────────────────────────
   // A display cannot ask the chip for a spectrum -- nothing here ever
   // computes one -- but it can ask what each voice is doing, which is more
-  // to the point on a nine-voice FM chip anyway.
+  // to the point on an FM chip anyway.
 
   /** Chip-wide switches, as the CF_* bits. */
   get chipFlags() {
     return (this.rhythmMode ? CF_RHYTHM : 0) | (this.amDepth ? CF_TREMOLO : 0) |
-      (this.vibDepth ? CF_VIBRATO : 0) | (this.waveSelectEnabled ? CF_WAVESEL : 0);
+      (this.vibDepth ? CF_VIBRATO : 0) | (this.waveSelectEnabled ? CF_WAVESEL : 0) |
+      (this.opl3 && this.newMode ? CF_OPL3 : 0) |
+      (this.fourOpBits && this.opl3 && this.newMode ? CF_FOUROP : 0);
   }
 
   /**
@@ -1097,21 +1573,27 @@ class OPL2 {
    */
   readMeters(out) {
     out.fill(0);
-    const melodic = this.rhythmMode ? 6 : CHANNEL_COUNT;
-    for (let c = 0; c < melodic; c++) this.#meterChannel(out, c, this.channels[c]);
+    const order = this.melodicOrder;
+    for (let row = 0; row < order.length; row++) {
+      const ch = this.channels[order[row]];
+      if (ch.pairRole === PAIR_SLAVE) continue;      // absorbed into its head
+      this.#meterChannel(out, row, ch);
+    }
     if (this.rhythmMode) {
+      const base = this.rhythmRow;
       const bits = this.rhythmBits;
       const ops = this.operators;
-      this.#meterChannel(out, METER_BD, this.channels[6], (bits & RHYTHM_BD) !== 0);
+      this.#meterChannel(out, base + R_BD, this.channels[6], (bits & RHYTHM_BD) !== 0);
       // The other four are one operator each. Only the tom is tonal: the
       // hi-hat, snare and cymbal build their phase out of bits of each
       // other's accumulators, so their channel's F-number is not a pitch and
       // reporting it as one would invent a note nobody is playing.
       const tomNote = this.#noteOf(this.channels[8]);
-      this.#meterOperator(out, METER_SD, ops[OP_BY_OFFSET[RHYTHM_SD_OP]], bits & RHYTHM_SD, -1);
-      this.#meterOperator(out, METER_TOM, ops[OP_BY_OFFSET[RHYTHM_TOM_OP]], bits & RHYTHM_TOM, tomNote);
-      this.#meterOperator(out, METER_TC, ops[OP_BY_OFFSET[RHYTHM_TC_OP]], bits & RHYTHM_TC, -1);
-      this.#meterOperator(out, METER_HH, ops[OP_BY_OFFSET[RHYTHM_HH_OP]], bits & RHYTHM_HH, -1);
+      const ch7 = this.channels[7], ch8 = this.channels[8];
+      this.#meterOperator(out, base + R_SD, ops[OP_BY_OFFSET[RHYTHM_SD_OP]], bits & RHYTHM_SD, -1, ch7);
+      this.#meterOperator(out, base + R_TOM, ops[OP_BY_OFFSET[RHYTHM_TOM_OP]], bits & RHYTHM_TOM, tomNote, ch8);
+      this.#meterOperator(out, base + R_TC, ops[OP_BY_OFFSET[RHYTHM_TC_OP]], bits & RHYTHM_TC, -1, ch8);
+      this.#meterOperator(out, base + R_HH, ops[OP_BY_OFFSET[RHYTHM_HH_OP]], bits & RHYTHM_HH, -1, ch7);
     }
     this.peaks.fill(0);
     return out;
@@ -1119,16 +1601,24 @@ class OPL2 {
 
   #meterChannel(out, row, ch, keyOn = ch.keyOn) {
     const o = row * METER_STRIDE;
+    const four = ch.pairRole === PAIR_HEAD;
+    const slave = four ? this.channels[ch.pairWith] : null;
+    // What a listener hears is the operator at the end of the chain, and what
+    // shapes it is the one at the start. On a four-operator voice those are
+    // two channels apart.
+    const output = four ? slave.car : ch.car;
     out[o + M_PEAK] = this.peaks[row] / MIX_SCALE;
     out[o + M_MOD_DB] = this.#attenuationDb(ch.mod);
     out[o + M_NOTE] = this.#noteOf(ch);
     out[o + M_KEY_ON] = keyOn ? 1 : 0;
-    out[o + M_STATE] = ch.car.state;
-    out[o + M_TIMBRE] = (ch.car.wave << T_CAR_WAVE) | (ch.mod.wave << T_MOD_WAVE) |
-      ((ch.additive ? 1 : 0) << T_ADDITIVE) | (ch.feedback << T_FEEDBACK);
+    out[o + M_STATE] = output.state;
+    out[o + M_TIMBRE] = (output.wave << T_CAR_WAVE) | (ch.mod.wave << T_MOD_WAVE) |
+      ((ch.additive ? 1 : 0) << T_ADDITIVE) | (ch.feedback << T_FEEDBACK) |
+      ((four ? 1 : 0) << T_FOUROP) | ((four && slave.additive ? 1 : 0) << T_CONN2);
+    out[o + M_PAN] = this.#panOf(ch);
   }
 
-  #meterOperator(out, row, op, keyOn, note) {
+  #meterOperator(out, row, op, keyOn, note, ch) {
     const o = row * METER_STRIDE;
     out[o + M_PEAK] = this.peaks[row] / MIX_SCALE;
     out[o + M_MOD_DB] = -1;                    // one operator: nothing modulates it
@@ -1136,6 +1626,13 @@ class OPL2 {
     out[o + M_KEY_ON] = keyOn ? 1 : 0;
     out[o + M_STATE] = op.state;
     out[o + M_TIMBRE] = op.wave << T_CAR_WAVE;
+    out[o + M_PAN] = this.#panOf(ch);
+  }
+
+  /** The channel's stereo switches, or plain centre on a chip without them. */
+  #panOf(ch) {
+    if (!this.stereo) return PAN_CENTRE;
+    return (ch.left ? 1 : 0) | (ch.right ? 2 : 0);
   }
 
   /** An operator's standing attenuation in dB: envelope, level and key scale. */
@@ -1151,11 +1648,34 @@ class OPL2 {
   }
 }
 
+/**
+ * A YM3812: nine channels, one output, four waveforms.
+ */
+class OPL2 extends OplChip {
+  constructor() { super({ opl3: false }); }
+}
+
+/**
+ * A YMF262: eighteen channels in two register banks, two outputs, eight
+ * waveforms, and six channel pairs that can be joined into four-operator
+ * voices.
+ *
+ * It comes up as a YM3812 and stays one until register 0x105 bit 0 is set --
+ * which is the chip's own behaviour, not a convenience here, and is what lets
+ * an unmodified AdLib driver work on an OPL3 card.
+ */
+class OPL3 extends OplChip {
+  constructor() { super({ opl3: true }); }
+}
+
 // == src/formats.js ==
 // Readers for the four Iyagi/AdLib file types.  Pure data in, plain objects
 // out -- no audio, no DOM.  See docs/FILE_FORMATS.en.md; section numbers in
 // the comments below refer to it.
 
+
+/** @typedef {import("./johab2unicode.js").DecodeOptions} DecodeOptions */
+/** Anything the readers will take: the bytes of a file. @typedef {Uint8Array|ArrayBufferView|ArrayBuffer} Bytes */
 
 const IMS_HEADER_SIZE = 70;
 const BNK_NAME_RECORD_SIZE = 12;
@@ -1163,8 +1683,185 @@ const BNK_PATCH_RECORD_SIZE = 30;
 const ISS_HEADER_SIZE = 154;
 const ISS_RECORD_SIZE = 5;
 const ISS_LINE_SIZE = 64;
+const SOP_HEADER_SIZE = 76;
+/** SOP §3.1: instType byte, then char[8] shortName and char[19] longName. */
+const SOP_INST_NAME_SIZE = 28;
+/** SOP §3.1: packed register bytes per instType. Anything else is a parse error. */
+const SOP_INST_DATA_SIZE = { 0: 22, 1: 11, 6: 11, 7: 11, 8: 11, 9: 11, 10: 11, 12: 0 };
+/** SOP §4.2: value bytes following the event code, in a sequenced track. */
+const SOP_TRACK_VALUE_SIZE = { 1: 1, 2: 3, 4: 1, 5: 1, 6: 1, 7: 1 };
+/** SOP §5: the control track has its own, disjoint, code space. */
+const SOP_CTRL_VALUE_SIZE = { 3: 1, 8: 1 };
 
 class FormatError extends Error {}
+
+/* ---------------------------------------------------------------- shapes */
+// The readers return plain objects, and these say what is in them. Field for
+// field they are the file, not a model of it: where the format has a number
+// the object has that number, and §-references in the comments above each
+// reader point at the bytes it came from.
+
+/**
+ * One FM operator's parameters, straight out of a BNK patch record. §2.3.
+ * @typedef {object} Operator
+ * @property {number} ksl @property {number} multiple @property {number} feedback
+ * @property {number} attack @property {number} sustain @property {number} eg
+ * @property {number} decay @property {number} release @property {number} totalLevel
+ * @property {number} am @property {number} vib @property {number} ksr
+ * @property {number} connection
+ */
+
+/**
+ * A named instrument: two operators and their waveform selects. §2.3.
+ *
+ * `pair` is the second half of a four-operator instrument, and only a `.sop`
+ * type-0 instrument has one (SOP §3.3). It is an ordinary Patch itself -- the
+ * same eleven bytes read the same way -- so a caller that knows nothing about
+ * four-operator voices reads the first pair and is right about it. The driver
+ * loads the second pair where the chip has somewhere to put it, and ignores it
+ * where it does not.
+ *
+ * @typedef {object} Patch
+ * @property {string} name
+ * @property {Operator} modulator
+ * @property {Operator} carrier
+ * @property {number} modWave
+ * @property {number} carWave
+ * @property {Patch} [pair] operators 3 and 4, for a four-operator instrument
+ */
+
+/**
+ * An AdLib instrument bank. §2.
+ * @typedef {object} Bank
+ * @property {number[]} version major and minor
+ * @property {number} used @property {number} count
+ * @property {number} offsetName @property {number} offsetData
+ * @property {Patch[]} patches in name-record order
+ * @property {Map<string, Patch>} byName keyed by upper-case name; §1.6
+ */
+
+/**
+ * An IMS song. The event stream is left as raw bytes -- walk it with
+ * `imsEvents`. §1.
+ * @typedef {object} ImsSong
+ * @property {number[]} version
+ * @property {string} title already Johab-decoded
+ * @property {number} tickBeat @property {number} beatMeasure
+ * @property {number} totalTick advisory; §1.5 -- FC is what ends the song
+ * @property {number} commandCount
+ * @property {number} srcTickBeat the source ROL's tickBeat, or 0; §1.8
+ * @property {boolean} percussive
+ * @property {number} pitchRange semitones, clamped to 1..12
+ * @property {number} tempo
+ * @property {Uint8Array} events
+ * @property {string[]} patchNames one per voice slot; resolve with `resolvePatches`
+ */
+
+/**
+ * One event off an IMS stream. `status` is the full status byte; `a` and `b`
+ * are the data bytes it actually uses.
+ * @typedef {object} ImsEvent
+ * @property {number} tick absolute, in ticks
+ * @property {number} delay ticks since the previous event
+ * @property {number} status
+ * @property {number} a @property {number} b
+ */
+
+/** @typedef {{tick: number, multiplier: number}} RolTempoEvent */
+/** @typedef {{tick: number, note: number, duration: number}} RolNote */
+/** @typedef {{tick: number, name: string, unknown: number}} RolTimbre */
+/** @typedef {{tick: number, volume: number}} RolVolume */
+/** @typedef {{tick: number, pitch: number}} RolPitch */
+
+/**
+ * One of a ROL's eleven voices. §3.
+ * @typedef {object} RolVoice
+ * @property {string} name
+ * @property {RolNote[]} notes
+ * @property {RolTimbre[]} timbres
+ * @property {RolVolume[]} volumes
+ * @property {RolPitch[]} pitches
+ * @property {number} [tickCount]
+ * @property {string} [timbreName] @property {string} [volumeName] @property {string} [pitchName]
+ */
+
+/**
+ * An AdLib Visual Composer song. §3.
+ * @typedef {object} RolSong
+ * @property {number[]} version
+ * @property {string} title free text in practice; Korean files put Johab here
+ * @property {number} tickBeat @property {number} beatMeasure
+ * @property {number} scaleY @property {number} scaleX
+ * @property {boolean} percussive isMelodic is INVERTED versus IMS; §1.1
+ * @property {number[]|null} counters
+ * @property {RolVoice[]} voices always eleven
+ * @property {{name: string, tempo: number, events: RolTempoEvent[]}} [tempoTrack]
+ * @property {number} [bytesRead]
+ */
+
+/**
+ * One lyric cue: the right edge of a highlight, not an isolated run. §4.2.
+ * @typedef {object} IssCue
+ * @property {number} tick already multiplied back up by 8
+ * @property {number} line @property {number} startX @property {number} widthX
+ */
+
+/**
+ * Timed lyrics. §4.
+ * @typedef {object} Iss
+ * @property {string} signature
+ * @property {string} writer @property {string} composer
+ * @property {string} singer @property {string} editor
+ * @property {string[]} lines 64-cell text lines, Johab-decoded
+ * @property {IssCue[]} cues sorted by tick
+ */
+
+/** A resolved highlight, in character cells. @typedef {{line: number, from: number, to: number}} IssSpan */
+
+/**
+ * One entry of a SOP's instrument table. `data` is left packed -- these are
+ * OPL register bytes, where a BNK carries thirteen unpacked parameters per
+ * operator -- so `sopPatch` is what turns one into something the driver takes.
+ * SOP §3.1.
+ * @typedef {object} SopInstrument
+ * @property {number} type 0 four-op, 1 two-op melody, 6..10 rhythm, 12 comment
+ * @property {string} shortName bank instrument name; `char[8]`, often unterminated
+ * @property {string} longName display name -- or, for type 12, the comment line
+ * @property {Uint8Array} data 22, 11 or 0 packed register bytes
+ */
+
+/**
+ * One event, off a sequenced track or off the control track. SOP §4.2, §5.
+ * @typedef {object} SopEvent
+ * @property {number} tick absolute, in ticks
+ * @property {number} delta ticks since the previous event on the same track
+ * @property {number} code
+ * @property {number} value
+ * @property {number} [length] note-on only, in ticks
+ */
+
+/**
+ * One of a SOP's twenty tracks. SOP §4.1.
+ * @typedef {object} SopTrack
+ * @property {number} mode channel mode, masked to 0..2; SOP §2
+ * @property {number} modeRaw the byte as stored -- bit 7 is undocumented, SOP §2
+ * @property {SopEvent[]} events
+ */
+
+/**
+ * A SOP song -- the format the "Note" editor wrote, magic `sopepos`. SOP §1.
+ * @typedef {object} SopSong
+ * @property {number[]} version major and minor; only 0.1 exists
+ * @property {string} fileName what it was saved as, which is not always its own name
+ * @property {string} title already Johab-decoded
+ * @property {boolean} percussive
+ * @property {number} tickBeat @property {number} beatMeasure @property {number} basicTempo
+ * @property {SopInstrument[]} instruments
+ * @property {SopTrack[]} tracks always twenty; SOP §1
+ * @property {SopEvent[]} control tempo and global volume only; SOP §5
+ * @property {string[]} comments the type-12 instruments' text, in file order; SOP §6
+ */
+
 
 const asBytes = (d) =>
   d instanceof Uint8Array ? d : new Uint8Array(d.buffer ?? d, d.byteOffset ?? 0, d.byteLength ?? d.length);
@@ -1181,7 +1878,11 @@ function text(bytes, from, len, options) {
 
 /* ------------------------------------------------------------------ BNK */
 
-/** Parse an AdLib instrument bank.  §2. */
+/**
+ * Parse an AdLib instrument bank.  §2.
+ * @param {Bytes} data
+ * @returns {Bank}
+ */
 function parseBnk(data) {
   const b = asBytes(data);
   if (b.length < 20) throw new FormatError("BNK too short");
@@ -1225,13 +1926,14 @@ const OPERATOR_FIELDS = [
   "decay", "release", "totalLevel", "am", "vib", "ksr", "connection",
 ];
 
+/** @returns {Operator} */
 function readOperator(b, o) {
   const op = {};
   for (let i = 0; i < OPERATOR_FIELDS.length; i++) op[OPERATOR_FIELDS[i]] = b[o + i];
   return op;
 }
 
-/** One 30-byte patch record.  §2.3. */
+/** One 30-byte patch record.  §2.3.  @returns {Patch} */
 function readPatch(b, o, name) {
   return {
     name,
@@ -1246,7 +1948,12 @@ function readPatch(b, o, name) {
 
 /* ------------------------------------------------------------------ IMS */
 
-/** Parse an IMS song.  §1.  The event stream is left as raw bytes. */
+/**
+ * Parse an IMS song.  §1.  The event stream is left as raw bytes.
+ * @param {Bytes} data
+ * @param {DecodeOptions} [options] how to read the Johab title
+ * @returns {ImsSong}
+ */
 function parseIms(data, options) {
   const b = asBytes(data);
   if (b.length < IMS_HEADER_SIZE) throw new FormatError("IMS too short");
@@ -1286,6 +1993,9 @@ function parseIms(data, options) {
 /**
  * Resolve an IMS song's patch names against banks, most specific first.
  * Returns one entry per name, null where nothing matched.  §1.6.
+ * @param {ImsSong} song
+ * @param {...(Bank|null|undefined)} banks
+ * @returns {(Patch|null)[]}
  */
 function resolvePatches(song, ...banks) {
   return song.patchNames.map((name) => {
@@ -1298,7 +2008,11 @@ function resolvePatches(song, ...banks) {
   });
 }
 
-/** Delta-time GCD, which recovers the composer's row grid.  §1.8. */
+/**
+ * Delta-time GCD, which recovers the composer's row grid.  §1.8.
+ * @param {ImsSong} song
+ * @returns {number}
+ */
 function deltaGcd(song) {
   let g = 0;
   for (const ev of imsEvents(song)) {
@@ -1313,6 +2027,8 @@ const gcd = (a, b) => (b ? gcd(b, a % b) : a);
  * Walk an IMS event stream.  Yields {tick, delay, status, a, b} per event;
  * `status` is the full status byte, `a`/`b` the data bytes it actually uses.
  * Tempo events yield {status: 0xF0, a: integer, b: fraction}.
+ * @param {ImsSong} song
+ * @returns {Generator<ImsEvent, void, undefined>}
  */
 function* imsEvents(song) {
   const d = song.events;
@@ -1363,7 +2079,12 @@ function* imsEvents(song) {
 
 /* ------------------------------------------------------------------ ROL */
 
-/** Parse an AdLib Visual Composer song.  §3. */
+/**
+ * Parse an AdLib Visual Composer song.  §3.
+ * @param {Bytes} data
+ * @param {DecodeOptions} [options]
+ * @returns {RolSong}
+ */
 function parseRol(data, options) {
   const b = asBytes(data);
   if (b.length < 182) throw new FormatError("ROL too short");
@@ -1427,7 +2148,12 @@ function parseRol(data, options) {
 
 /* ------------------------------------------------------------------ ISS */
 
-/** Parse timed lyrics.  §4.  Returns null for anything that is not an ISS. */
+/**
+ * Parse timed lyrics.  §4.  Returns null for anything that is not an ISS.
+ * @param {Bytes} data
+ * @param {DecodeOptions} [options]
+ * @returns {Iss|null}
+ */
 function parseIss(data, options) {
   const b = asBytes(data);
   if (b.length < ISS_HEADER_SIZE) return null;
@@ -1481,6 +2207,9 @@ function parseIss(data, options) {
  * animation: a banner line whose right edge runs out and back reads as a
  * volume meter, and 168 corpus lines carry more than sixty cues doing exactly
  * that.
+ *
+ * @param {Iss} iss
+ * @returns {IssSpan[]}
  */
 function resolveIssSpans(iss) {
   const out = [];
@@ -1494,10 +2223,195 @@ function resolveIssSpans(iss) {
   return out;
 }
 
-/** Sniff a dropped file by content, since extensions are not always right. */
+/* ------------------------------------------------------------------ SOP */
+
+/**
+ * Parse a SOP song. SOP §1.
+ *
+ * Everything after the 76-byte header is positional -- channel modes, then
+ * instruments, then twenty tracks, then the control track, with no offsets
+ * anywhere -- so this has to be read strictly in order, the way a ROL does.
+ * The upside is that the file has to end exactly where the control track does,
+ * which is a strong check that nothing was misread: all 336 corpus files land
+ * on the last byte.
+ *
+ * @param {Bytes} data
+ * @param {DecodeOptions} [options] how to read the Johab title
+ * @returns {SopSong}
+ */
+function parseSop(data, options) {
+  const b = asBytes(data);
+  if (b.length < SOP_HEADER_SIZE) throw new FormatError("SOP too short");
+  if (String.fromCharCode(...b.subarray(0, 7)) !== "sopepos") {
+    throw new FormatError("not a SOP file (bad signature)");
+  }
+  const dv = view(b);
+  const nTracks = b[73];
+  const song = {
+    version: [b[7], b[8]],
+    fileName: text(b, 10, 13, options),
+    title: text(b, 23, 31, options),
+    percussive: b[54] !== 0,
+    tickBeat: b[56],
+    beatMeasure: b[58],
+    basicTempo: b[59],
+    // Bytes 60..72 are a comment field the editor never wrote to; SOP §1 --
+    // 110 corpus files leave uninitialised stack in it, so it is not exposed.
+    instruments: [],
+    tracks: [],
+    control: [],
+    comments: [],
+  };
+
+  let o = SOP_HEADER_SIZE;
+  const modes = b.subarray(o, o + nTracks);
+  o += nTracks;
+  if (o > b.length) throw new FormatError("SOP channel-mode table truncated");
+
+  for (let i = 0; i < b[74]; i++) {
+    if (o + SOP_INST_NAME_SIZE > b.length) throw new FormatError("SOP instrument truncated");
+    const type = b[o];
+    const size = SOP_INST_DATA_SIZE[type];
+    if (size === undefined) {
+      throw new FormatError(`SOP instrument ${i}: unknown instType ${type}`);
+    }
+    const inst = {
+      type,
+      shortName: text(b, o + 1, 8, options),
+      longName: text(b, o + 9, 19, options),
+      data: b.subarray(o + SOP_INST_NAME_SIZE, o + SOP_INST_NAME_SIZE + size),
+    };
+    // §6: type 12 is not an instrument at all -- it is one 19-column line of
+    // the song's scrolling credits, parked in the instrument table so that the
+    // editor had somewhere to keep it.
+    if (type === 12) song.comments.push(inst.longName);
+    song.instruments.push(inst);
+    o += SOP_INST_NAME_SIZE + size;
+  }
+
+  /** §4.1 and §5 share a layout: u16 event count, u32 byte count, then events. */
+  const readTrack = (sizes, what) => {
+    if (o + 6 > b.length) throw new FormatError(`SOP ${what} header truncated`);
+    const count = dv.getUint16(o, true);
+    const size = dv.getUint32(o + 2, true);
+    o += 6;
+    const end = o + size;
+    if (end > b.length) throw new FormatError(`SOP ${what} runs past the end of the file`);
+    const events = [];
+    let tick = 0;
+    while (o < end) {
+      const delta = dv.getUint16(o, true);
+      const code = b[o + 2];
+      const valueSize = sizes[code];
+      if (valueSize === undefined) throw new FormatError(`SOP ${what}: unknown event ${code}`);
+      tick += delta;
+      const ev = { tick, delta, code, value: b[o + 3] };
+      // §4.2: only the note-on carries more than one value byte.
+      if (code === 2) ev.length = dv.getUint16(o + 4, true);
+      events.push(ev);
+      o += 3 + valueSize;
+    }
+    // Both counts are redundant with the walk, which is exactly why they are
+    // worth checking: either one disagreeing means the events were misread.
+    if (o !== end) throw new FormatError(`SOP ${what}: events overran dataSize`);
+    if (events.length !== count) {
+      throw new FormatError(`SOP ${what}: numEvents says ${count}, walked ${events.length}`);
+    }
+    return events;
+  };
+
+  for (let t = 0; t < nTracks; t++) {
+    song.tracks.push({
+      mode: modes[t] & 0x7f,      // §2: bit 7 is undocumented and carries no events
+      modeRaw: modes[t],
+      events: readTrack(SOP_TRACK_VALUE_SIZE, `track ${t}`),
+    });
+  }
+  song.control = readTrack(SOP_CTRL_VALUE_SIZE, "control track");
+  return song;
+}
+
+/** Unpack one operator's five register bytes into a bank operator. SOP §3.2. */
+function sopOperator(char, scale, attackDecay, sustainRelease, feedback) {
+  return {
+    ksl: (scale >> 6) & 3,
+    multiple: char & 0x0f,
+    feedback: (feedback >> 1) & 7,
+    attack: (attackDecay >> 4) & 0x0f,
+    sustain: (sustainRelease >> 4) & 0x0f,
+    eg: (char >> 5) & 1,
+    decay: attackDecay & 0x0f,
+    release: sustainRelease & 0x0f,
+    totalLevel: scale & 0x3f,
+    am: (char >> 7) & 1,
+    vib: (char >> 6) & 1,
+    ksr: (char >> 4) & 1,
+    // A bank's `connection` is the 0xC0 bit read the other way up: the driver
+    // writes `connection ? 0 : 1`, so an additive patch stores 0 here.
+    connection: feedback & 1 ? 0 : 1,
+  };
+}
+
+/**
+ * One eleven-byte operator pair, as a Patch. SOP §3.2.
+ *
+ * `singleOp` is the rhythm-voice reading: types 7..10 are one operator, and in
+ * those everything from the feedback byte on is uninitialised -- 81% of corpus
+ * hi-hats put something out of range in it. Those bytes are zeroed rather than
+ * passed on; the driver never reads them back for a rhythm voice anyway.
+ */
+function sopPair(name, d, at, singleOp) {
+  const feedback = singleOp ? 0 : d[at + 5];
+  return {
+    name,
+    modulator: sopOperator(d[at], d[at + 1], d[at + 2], d[at + 3], feedback),
+    carrier: singleOp
+      ? sopOperator(0, 0, 0, 0, 0)
+      : sopOperator(d[at + 6], d[at + 7], d[at + 8], d[at + 9], feedback),
+    // Wave selects 4..7 are the OPL3's. They pass through as the file stores
+    // them; the driver masks them to what its chip can actually reach.
+    modWave: d[at + 4],
+    carWave: singleOp ? 0 : d[at + 10],
+  };
+}
+
+/**
+ * Turn a SOP instrument into the shape a BNK patch has, so that the driver can
+ * load it. Returns null for a comment (type 12) and for anything whose data
+ * the file cut short.
+ *
+ * A four-operator instrument (type 0) is two of these back to back, and comes
+ * back as a patch carrying its second pair in `pair`. What happens to that pair
+ * is the chip's business rather than the format's: a YMF262 joins two channels
+ * and plays all four operators, and a YM3812 has no fourth-operator register to
+ * put them in and plays the first pair alone. SOP §8.
+ *
+ * @param {SopInstrument} inst
+ * @returns {Patch|null}
+ */
+function sopPatch(inst) {
+  const d = inst.data;
+  if (inst.type === 12 || d.length < 11) return null;
+  const singleOp = inst.type >= 7 && inst.type <= 10;
+  const patch = sopPair(inst.shortName, d, 0, singleOp);
+  // §3.3: the second pair sits at register offsets 0x08/0x0B with its own
+  // feedback byte, which is the same eleven-byte layout eleven bytes along.
+  if (inst.type === 0 && d.length >= 22) patch.pair = sopPair(inst.shortName, d, 11, false);
+  return patch;
+}
+
+/**
+ * Sniff a dropped file by content, since extensions are not always right.
+ * @param {Bytes} data
+ * @returns {"ims"|"rol"|"bnk"|"iss"|"sop"|null}
+ */
 function identify(data) {
   const b = asBytes(data);
   if (b.length >= 8 && String.fromCharCode(...b.subarray(2, 8)) === "ADLIB-") return "bnk";
+  // SOP first: its magic is seven bytes of ASCII, so nothing else can collide.
+  if (b.length >= SOP_HEADER_SIZE && String.fromCharCode(...b.subarray(0, 7)) === "sopepos") {
+    return "sop";
+  }
   if (b.length >= 3 && b[0] === 0x49 && b[1] === 0x4d && b[2] === 0x50) return "iss";
   if (b.length >= IMS_HEADER_SIZE && b[0] === 1 && b[1] === 0) {
     const ds = view(b).getInt32(42, true);
@@ -1511,13 +2425,19 @@ function identify(data) {
 }
 
 // == src/driver.js ==
-// The AdLib low-level driver: patches, volumes, notes and bends in, OPL2
+// The AdLib low-level driver: patches, volumes, notes and bends in, OPL
 // register writes out. This is a straight realisation of
 // docs/ENGINE_SPEC.en.md; section numbers below refer to it.
 //
 // The driver holds no chip of its own -- it writes into any object with a
 // `write(reg, value)` method -- so the same code drives the emulator, a test
 // double that logs writes, or real hardware over a serial bridge.
+//
+// It drives a YM3812 or a YMF262, and the difference is smaller than it looks:
+// an OPL3 is the same nine channels twice, at `reg | 0x100`, so every table
+// below is the OPL2's table with a second copy appended. What is genuinely new
+// is in §10 and §11 -- four-operator voices and the stereo switches.
+
 
 
 /** §5.2: MIDI note 60 is chip note 48. */
@@ -1526,7 +2446,14 @@ const CHIP_NOTES = 96;
 const MID_PITCH = 0x2000;
 const MAX_VOLUME = 127;
 
-/** §1: logical voice numbers of the five rhythm instruments. */
+/**
+ * §1: logical voice numbers of the five rhythm instruments **on an OPL2**.
+ *
+ * The rhythm voices always come last, so on an OPL3 they are 15…19 instead.
+ * `driver.rhythmBase` is where they start and `driver.bd`…`driver.hh` name
+ * them on whichever chip the driver is actually driving; these constants stay
+ * because nine-voice callers are the common case and 6…10 is what they mean.
+ */
 const BD = 6, SD = 7, TOM = 8, TC = 9, HH = 10;
 const RHYTHM_MASK = [0x10, 0x08, 0x04, 0x02, 0x01];   // BD, SD, TOM, TC, HH
 
@@ -1534,28 +2461,30 @@ const RHYTHM_MASK = [0x10, 0x08, 0x04, 0x02, 0x01];   // BD, SD, TOM, TC, HH
 const TOM_PITCH = 24;
 const TOM_TO_SD = 7;
 
-/** §1: register offset of each operator, by slot number. */
+/** §1: register offset of each operator, by slot number, within one bank. */
 const SLOT_OFFSET = [
   0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 16, 17, 18, 19, 20, 21,
 ];
-/** §1: the two slots of each melodic voice. */
+/** §1: the two slots of each melodic channel. */
 const MELODIC_SLOTS = [
   [0, 3], [1, 4], [2, 5], [6, 9], [7, 10], [8, 11], [12, 15], [13, 16], [14, 17],
 ];
-/** §1: percussive mode -- 255 means the voice uses one operator only. */
-const PERCUSSIVE_SLOTS = [
-  [0, 3], [1, 4], [2, 5], [6, 9], [7, 10], [8, 11],
-  [12, 15], [16, 255], [14, 255], [17, 255], [13, 255],
+/** §6: the rhythm voices' slots -- 255 means the voice uses one operator only. */
+const RHYTHM_SLOTS = [
+  [12, 15],      // bass drum, channel 6, two operators like any melodic voice
+  [16, 255],     // snare     channel 7 carrier
+  [14, 255],     // tom-tom   channel 8 modulator
+  [17, 255],     // cymbal    channel 8 carrier
+  [13, 255],     // hi-hat    channel 7 modulator
 ];
 const SLOT_IS_CARRIER = [
   0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1,
 ];
-const MELODIC_VOICE_OF_SLOT = [
+/** §1: which channel of its bank an operator slot physically belongs to. */
+const SLOT_CHANNEL = [
   0, 1, 2, 0, 1, 2, 3, 4, 5, 3, 4, 5, 6, 7, 8, 6, 7, 8,
 ];
-const PERCUSSIVE_VOICE_OF_SLOT = [
-  0, 1, 2, 0, 1, 2, 3, 4, 5, 3, 4, 5, BD, HH, TOM, BD, SD, TC,
-];
+const SLOTS_PER_BANK = 18;
 
 /** The thirteen per-operator parameters, in bank order. §2.3 of the formats doc. */
 const P_KSL = 0, P_MULTIPLE = 1, P_FEEDBACK = 2, P_ATTACK = 3, P_SUSTAIN = 4,
@@ -1574,33 +2503,201 @@ function operatorParams(op) {
   return out;
 }
 
+/** Where a slot's four-operator chain puts it: op1, op2, op3 or op4. */
+const OP1 = 0, OP2 = 1, OP3 = 2, OP4 = 3, NOT_FOUR = -1;
+
+/**
+ * §1, §10. The voice layouts of a chip. They depend on nothing but which chip
+ * it is, so they are built once and shared -- `sopSequence` has to know the
+ * shape of a chip's voices before a driver exists to ask.
+ *
+ * Both layouts follow one rule: melodic voices in channel order, then -- in
+ * percussive mode -- the five rhythm instruments on the end, which take over
+ * channels 6, 7 and 8 of the first bank. Nine channels give 9 voices or 6 + 5;
+ * eighteen give 18 or 15 + 5. The rhythm voices are the last five either way,
+ * which is what lets a display index a meter row with a voice number without
+ * knowing which chip it is looking at.
+ *
+ * @param {boolean} opl3
+ */
+function makeLayout(opl3) {
+  const banks = opl3 ? 2 : 1;
+  const channelCount = opl3 ? OPL3_CHANNEL_COUNT : CHANNEL_COUNT;
+  const slotCount = banks * SLOTS_PER_BANK;
+
+  const melodicSlots = [], melodicChannel = [];
+  for (let b = 0; b < banks; b++) {
+    for (let c = 0; c < CHANNEL_COUNT; c++) {
+      melodicSlots.push(MELODIC_SLOTS[c].map((slot) => slot + b * SLOTS_PER_BANK));
+      melodicChannel.push(c + b * CHANNEL_COUNT);
+    }
+  }
+  const melodicMap = { slots: melodicSlots, channel: melodicChannel };
+
+  // Percussive mode: the first bank loses channels 6, 7 and 8 to the drums,
+  // the second bank keeps all nine, and the drums go on the end.
+  const percSlots = [], percChannel = [];
+  for (let c = 0; c < 6; c++) { percSlots.push(melodicSlots[c]); percChannel.push(c); }
+  for (let c = CHANNEL_COUNT; c < channelCount; c++) {
+    percSlots.push(melodicSlots[c]); percChannel.push(melodicChannel[c]);
+  }
+  const rhythmBase = percSlots.length;
+  for (const slots of RHYTHM_SLOTS) percSlots.push(slots);
+  percChannel.push(6, 7, 8, 8, 7);
+  const percussiveMap = { slots: percSlots, channel: percChannel };
+
+  // A slot's channel never moves; only which voice is using it does.
+  const slotChannel = new Int32Array(slotCount);
+  const slotCarrier = new Int32Array(slotCount);
+  const slotRegister = new Int32Array(slotCount);
+  for (let s = 0; s < slotCount; s++) {
+    const local = s % SLOTS_PER_BANK, bank = (s / SLOTS_PER_BANK) | 0;
+    slotChannel[s] = SLOT_CHANNEL[local] + bank * CHANNEL_COUNT;
+    slotCarrier[s] = SLOT_IS_CARRIER[local];
+    slotRegister[s] = SLOT_OFFSET[local] + bank * BANK_STRIDE;
+  }
+
+  // §10: only six channel pairs can be joined, and only ever a channel with
+  // the one three above it in the same bank. Translating those channel pairs
+  // into voice numbers is all this does; in melodic mode voice and channel are
+  // the same number, and in percussive mode the second bank has been shifted
+  // down by the three channels the drums took.
+  for (const map of [melodicMap, percussiveMap]) {
+    const index = new Int32Array(map.slots.length).fill(-1);
+    const partner = new Int32Array(map.slots.length).fill(-1);
+    const pairs = [];
+    if (opl3) {
+      FOUROP_PAIRS.forEach(([headCh, slaveCh], i) => {
+        const head = map.channel.indexOf(headCh), slave = map.channel.indexOf(slaveCh);
+        if (head < 0 || slave < 0) return;
+        index[head] = i;
+        partner[head] = slave;
+        partner[slave] = head;
+        pairs.push([head, slave]);
+      });
+    }
+    map.four = { index, partner, pairs };
+    // Slot -> voice, which the layout fixes. Only the four-operator override
+    // on top of it moves, and `#voiceOfSlot` applies that.
+    map.voiceOfSlot = new Int32Array(slotCount).fill(-1);
+    map.slots.forEach((slots, v) => {
+      for (const slot of slots) if (slot !== 255) map.voiceOfSlot[slot] = v;
+    });
+  }
+
+  return {
+    opl3, banks, channelCount, slotCount, rhythmBase,
+    melodicMap, percussiveMap, slotChannel, slotCarrier, slotRegister,
+  };
+}
+
+const LAYOUTS = [makeLayout(false), makeLayout(true)];
+
+/** The shared layout of a YM3812 or a YMF262. @param {boolean} opl3 */
+function chipLayout(opl3) { return LAYOUTS[opl3 ? 1 : 0]; }
+
+/**
+ * What a sequencer needs to know about a chip's voices before it can lay a
+ * song over them: how many melodic ones there are, where the drums start, and
+ * which voices can be joined into four-operator ones.
+ *
+ * @param {boolean} opl3 @param {boolean} percussive
+ * @returns {{melodicVoices:number, rhythmBase:number, fourOpPairs:number[][], voiceCount:number}}
+ */
+function voiceLayout(opl3, percussive) {
+  const layout = chipLayout(opl3);
+  const map = percussive ? layout.percussiveMap : layout.melodicMap;
+  return {
+    melodicVoices: percussive ? layout.rhythmBase : map.slots.length,
+    rhythmBase: layout.rhythmBase,
+    fourOpPairs: map.four.pairs,
+    voiceCount: map.slots.length,
+  };
+}
+
 class AdlibDriver {
-  /** @param {{write(reg:number, value:number):void}} chip */
-  constructor(chip) {
+  /**
+   * @param {{write(reg:number, value:number):void}} chip
+   * @param {object} [options]
+   * @param {boolean} [options.opl3] drive a YMF262: two banks, eighteen
+   *   channels, four-operator voices and stereo. Default false, which is a
+   *   YM3812 and is what `.ims` and `.rol` want.
+   */
+  constructor(chip, options = {}) {
     this.chip = chip;
-    this.slotParams = Array.from({ length: 18 }, () => new Int32Array(14));
+    /** @type {boolean} */
+    this.opl3 = !!options.opl3;
+    const layout = chipLayout(this.opl3);
+    this.banks = layout.banks;
+    this.channelCount = layout.channelCount;
+    this.slotCount = layout.slotCount;
+    /** @type {number} the voice number of the bass drum: 6 here, 15 on an OPL3 */
+    this.rhythmBase = layout.rhythmBase;
+    this.melodicMap = layout.melodicMap;
+    this.percussiveMap = layout.percussiveMap;
+    this.slotChannel = layout.slotChannel;
+    this.slotCarrier = layout.slotCarrier;
+    this.slotRegister = layout.slotRegister;
+    /** §1: the five rhythm voices, on whichever chip this is. */
+    this.bd = this.rhythmBase;
+    this.sd = this.rhythmBase + 1;
+    this.tom = this.rhythmBase + 2;
+    this.tc = this.rhythmBase + 3;
+    this.hh = this.rhythmBase + 4;
+    this.slotParams = Array.from({ length: this.slotCount }, () => new Int32Array(14));
     this.reset();
   }
 
   /** §2. Leaves the chip in melodic mode with every voice at full volume. */
   reset() {
-    for (let r = 1; r <= 0xf5; r++) this.chip.write(r, 0);
+    // NEW first: until it is set, a YMF262 ignores its second bank, so zeroing
+    // the bank before setting it would zero nothing.
+    if (this.opl3) this.chip.write(REG_OPL3_ENABLE, OPL3_NEW);
+    for (let b = 0; b < this.banks; b++) {
+      const base = b * BANK_STRIDE;
+      for (let r = 1; r <= 0xf5; r++) {
+        const reg = base + r;
+        if (reg === REG_FOUROP || reg === REG_OPL3_ENABLE) continue;
+        this.chip.write(reg, 0);
+      }
+    }
     this.chip.write(0x04, 0x06);
+    if (this.opl3) this.chip.write(REG_FOUROP, 0);
 
-    this.voiceNote = new Int32Array(9);
-    this.voiceKeyOn = new Int32Array(9);
-    this.voiceBend = new Int32Array(9).fill(MID_PITCH);
-    this.bxCache = new Int32Array(9);
-    this.voiceVolume = new Int32Array(11).fill(MAX_VOLUME);
+    this.voiceNote = new Int32Array(this.channelCount + RHYTHM_VOICES);
+    this.voiceKeyOn = new Int32Array(this.channelCount + RHYTHM_VOICES);
+    this.voiceBend = new Int32Array(this.channelCount + RHYTHM_VOICES).fill(MID_PITCH);
+    this.bxCache = new Int32Array(this.channelCount + RHYTHM_VOICES);
+    /** @type {Int32Array} per-voice volume 0..127, wide enough for rhythm mode */
+    this.voiceVolume = new Int32Array(this.channelCount + RHYTHM_VOICES).fill(MAX_VOLUME);
+    /** @type {Int32Array} 1 where a voice is currently four operators wide */
+    this.voiceFourOp = new Int32Array(this.channelCount + RHYTHM_VOICES);
+    /** @type {number} */
     this.percBits = 0;
+    /** @type {boolean} */
     this.percussion = false;
-    this.voiceCount = 9;
+    /** @type {number} 9 or 11 on an OPL2; 18 or 20 on an OPL3 */
+    this.voiceCount = this.melodicMap.slots.length;
+    /** @type {number} */
     this.amDepth = 0;
+    /** @type {number} */
     this.vibDepth = 0;
+    /** @type {number} */
     this.noteSelect = 0;
+    /** @type {number} */
     this.pitchRange = 1;
+    /** @type {boolean} */
     this.waveSelect = true;
+    /** @type {number} register 0x104, one bit per pair of FOUROP_PAIRS */
+    this.fourOpBits = 0;
     for (const p of this.slotParams) p.fill(0);
+
+    // §11: a YMF262 comes up with both stereo switches clear, which is silence
+    // rather than mono. Writing centre to every channel is what makes a driver
+    // that never thinks about panning sound the same on both chips.
+    this.channelPan = new Int32Array(this.channelCount).fill(PAN_CENTRE);
+    this.channelC0 = new Int32Array(this.channelCount);
+    if (this.opl3) for (let c = 0; c < this.channelCount; c++) this.#writeC0(c);
 
     this.setMode(false);
     this.setGlobalParams(0, 0, 0);
@@ -1608,109 +2705,221 @@ class AdlibDriver {
     this.setWaveSelect(true);
   }
 
-  /** §6. `percussive` true puts the chip in rhythm mode. */
+  /** §6. `percussive` true puts the chip in rhythm mode. @param {boolean} percussive */
   setMode(percussive) {
     if (percussive) {
-      this.voiceNote[TOM] = TOM_PITCH;
-      this.voiceBend[TOM] = MID_PITCH;
       this.percussion = true;              // slot maps must already be percussive
-      this.#updateFNums(TOM);
-      this.voiceNote[SD] = TOM_PITCH + TOM_TO_SD;
-      this.voiceBend[SD] = MID_PITCH;
-      this.#updateFNums(SD);
+      this.voiceCount = this.percussiveMap.slots.length;
+      this.voiceNote[this.tom] = TOM_PITCH;
+      this.voiceBend[this.tom] = MID_PITCH;
+      this.#updateFNums(this.tom);
+      this.voiceNote[this.sd] = TOM_PITCH + TOM_TO_SD;
+      this.voiceBend[this.sd] = MID_PITCH;
+      this.#updateFNums(this.sd);
     }
     this.percussion = percussive;
-    this.voiceCount = percussive ? 11 : 9;
+    this.voiceCount = percussive
+      ? this.percussiveMap.slots.length : this.melodicMap.slots.length;
     this.percBits = 0;
+    // §10: the two modes number their voices differently, so a four-operator
+    // flag set under one of them means something else under the other. Split
+    // every pair rather than carry the flags across.
+    if (this.opl3 && this.fourOpBits) {
+      this.fourOpBits = 0;
+      this.voiceFourOp.fill(0);
+      this.chip.write(REG_FOUROP, 0);
+    }
     this.#sendAmVibRhythm();
   }
 
+  /** @param {boolean} on */
   setWaveSelect(on) {
     this.waveSelect = !!on;
-    for (let s = 0; s < 18; s++) this.chip.write(0xe0 + SLOT_OFFSET[s], 0);
+    for (let s = 0; s < this.slotCount; s++) this.chip.write(0xe0 + this.slotRegister[s], 0);
     this.chip.write(0x01, on ? 0x20 : 0);
   }
 
-  /** §5.2. Clamped into 1…12 semitones, as the driver does. */
+  /** §5.2. Clamped into 1…12 semitones, as the driver does. @param {number} semitones */
   setPitchRange(semitones) {
     this.pitchRange = Math.min(12, Math.max(1, semitones | 0));
   }
 
+  /**
+   * @param {number} amDepth @param {number} vibDepth @param {number} noteSelect
+   */
   setGlobalParams(amDepth, vibDepth, noteSelect) {
     this.amDepth = amDepth; this.vibDepth = vibDepth; this.noteSelect = noteSelect;
     this.#sendAmVibRhythm();
     this.chip.write(0x08, noteSelect ? 0x40 : 0);
   }
 
-  /** §3. Load a parsed bank patch into a voice. */
+  /** The voice numbers a song may use as ordinary melodic voices. §1. */
+  get melodicVoices() {
+    return this.percussion ? this.rhythmBase : this.voiceCount;
+  }
+
+  /**
+   * §10. Voice-number pairs that can be joined into one four-operator voice,
+   * in the current mode. Empty on an OPL2.
+   * @returns {number[][]}
+   */
+  get fourOpPairs() {
+    return this.#map().four.pairs;
+  }
+
+  /** §3. Load a parsed bank patch into a voice.
+   *
+   * A patch carrying a second operator pair (SOP §3.3) is loaded as a
+   * four-operator voice where the voice can be one, and as its first pair
+   * alone where it cannot -- which is the whole of the OPL2 degradation, in
+   * one branch.
+   *
+   * @param {number} voice @param {import("./formats.js").Patch} patch
+   */
   setVoiceTimbre(voice, patch) {
     if (voice >= this.voiceCount) return;
+    const map = this.#map();
+    const pairIndex = map.four.index[voice];
+    const four = pairIndex >= 0 && !!patch.pair;
+    // Joining or splitting the pair before loading it: the chip reads four
+    // operators as one voice only while 0x104 says so.
+    if (pairIndex >= 0) this.#setFourOp(pairIndex, voice, four);
+
     const slots = this.#slotsOf(voice);
     this.#setSlot(slots[0], operatorParams(patch.modulator), patch.modWave);
     if (slots[1] !== 255) {
       this.#setSlot(slots[1], operatorParams(patch.carrier), patch.carWave);
     }
+    if (four) {
+      const partner = this.#slotsOf(map.four.partner[voice]);
+      this.#setSlot(partner[0], operatorParams(patch.pair.modulator), patch.pair.modWave);
+      this.#setSlot(partner[1], operatorParams(patch.pair.carrier), patch.pair.carWave);
+      // §10: all four operators are one voice at one pitch, and the chip reads
+      // the head's F-number. Writing it to both halves keeps the two readings
+      // of that from being distinguishable.
+      this.#updateFNums(voice);
+      // Which operators channel volume applies to depends on *both* halves'
+      // connection bits, so the first pair's levels were computed against the
+      // second pair's previous patch. Send all four again now they agree.
+      for (const slot of this.#allSlotsOf(voice)) this.#sendKslLevel(slot);
+    }
   }
 
-  /** §4. Channel volume, 0…127. */
+  /** §4. Channel volume, 0…127.
+   * @param {number} voice @param {number} volume 0..127
+   */
   setVoiceVolume(voice, volume) {
     if (voice >= this.voiceCount) return;
     this.voiceVolume[voice] = Math.min(MAX_VOLUME, volume | 0);
-    const slots = this.#slotsOf(voice);
-    this.#sendKslLevel(slots[0]);
-    if (slots[1] !== 255) this.#sendKslLevel(slots[1]);
+    for (const slot of this.#allSlotsOf(voice)) this.#sendKslLevel(slot);
   }
 
-  /** §5. 14-bit bend, 0x2000 is centre. Melodic voices and the bass drum. */
+  /**
+   * §11. Route a voice to the left output, the right, both or neither, as the
+   * PAN_* values. An OPL2 has one output and ignores this.
+   *
+   * @param {number} voice @param {number} pan PAN_NONE…PAN_CENTRE
+   */
+  setVoicePan(voice, pan) {
+    if (!this.opl3 || voice >= this.voiceCount) return;
+    const map = this.#map();
+    const value = pan & 3;
+    // A four-operator voice is two channels, and which of the two carries the
+    // output is not worth depending on: both get the same switches.
+    const voices = map.four.index[voice] >= 0 && this.voiceFourOp[voice]
+      ? [voice, map.four.partner[voice]] : [voice];
+    for (const v of voices) {
+      const channel = map.channel[v];
+      if (this.channelPan[channel] === value) continue;
+      this.channelPan[channel] = value;
+      this.#writeC0(channel);
+    }
+  }
+
+  /** §5. 14-bit bend, 0x2000 is centre. Melodic voices and the bass drum.
+   * @param {number} voice @param {number} bend 14-bit, 0x2000 centred
+   */
   setVoicePitch(voice, bend) {
-    if ((!this.percussion && voice < 9) || voice <= BD) {
+    if (this.#isMelodic(voice) || voice === this.bd) {
       this.voiceBend[voice] = Math.min(0x3fff, Math.max(0, bend | 0));
       this.#updateFNums(voice);
     }
   }
 
-  /** §7. `note` is a MIDI note number. */
+  /** §7. `note` is a MIDI note number.
+   * @param {number} voice @param {number} note MIDI note number
+   */
   noteOn(voice, note) {
     let pitch = note - MIDI_TO_CHIP;
     if (pitch < 0) pitch = 0;
-    if ((!this.percussion && voice < 9) || voice < BD) {
+    if (this.#isMelodic(voice)) {
       this.voiceNote[voice] = pitch;
       this.voiceKeyOn[voice] = 0x20;
       this.#updateFNums(voice);
-    } else if (this.percussion && voice <= HH) {
-      if (voice === BD) {
-        this.voiceNote[BD] = pitch;
-        this.#updateFNums(BD);
-      } else if (voice === TOM && this.voiceNote[TOM] !== pitch) {
+    } else if (this.#isRhythm(voice)) {
+      if (voice === this.bd) {
+        this.voiceNote[this.bd] = pitch;
+        this.#updateFNums(this.bd);
+      } else if (voice === this.tom && this.voiceNote[this.tom] !== pitch) {
         // §6: only the tom carries a pitch, and it drags the snare with it.
-        this.voiceNote[TOM] = pitch;
-        this.voiceNote[SD] = pitch + TOM_TO_SD;
-        this.#updateFNums(TOM);
-        this.#updateFNums(SD);
+        this.voiceNote[this.tom] = pitch;
+        this.voiceNote[this.sd] = pitch + TOM_TO_SD;
+        this.#updateFNums(this.tom);
+        this.#updateFNums(this.sd);
       }
-      this.percBits |= RHYTHM_MASK[voice - BD];
+      this.percBits |= RHYTHM_MASK[voice - this.rhythmBase];
       this.#sendAmVibRhythm();
     }
   }
 
-  /** §7. */
+  /** §7.
+   * @param {number} voice
+   */
   noteOff(voice) {
-    if ((!this.percussion && voice < 9) || voice < BD) {
+    if (this.#isMelodic(voice)) {
       this.voiceKeyOn[voice] = 0;
       this.bxCache[voice] &= ~0x20;
-      this.chip.write(0xb0 + voice, this.bxCache[voice]);
-    } else if (this.percussion && voice <= HH) {
-      this.percBits &= ~RHYTHM_MASK[voice - BD];
+      this.#writeChannel(0xb0, this.#map().channel[voice], this.bxCache[voice]);
+      if (this.voiceFourOp[voice]) {
+        this.#writeChannel(0xb0, this.#map().channel[this.#map().four.partner[voice]],
+          this.bxCache[voice]);
+      }
+    } else if (this.#isRhythm(voice)) {
+      this.percBits &= ~RHYTHM_MASK[voice - this.rhythmBase];
       this.#sendAmVibRhythm();
     }
   }
 
-  #slotsOf(voice) {
-    return this.percussion ? PERCUSSIVE_SLOTS[voice] : MELODIC_SLOTS[voice];
+  #map() { return this.percussion ? this.percussiveMap : this.melodicMap; }
+
+  /** A voice that takes a note and a pitch of its own, as opposed to a drum. */
+  #isMelodic(voice) { return voice >= 0 && voice < this.melodicVoices; }
+
+  #isRhythm(voice) {
+    return this.percussion &&
+      voice >= this.rhythmBase && voice < this.rhythmBase + RHYTHM_VOICES;
   }
 
-  #voiceOfSlot(slot) {
-    return this.percussion ? PERCUSSIVE_VOICE_OF_SLOT[slot] : MELODIC_VOICE_OF_SLOT[slot];
+  #slotsOf(voice) { return this.#map().slots[voice]; }
+
+  /** Every operator slot a voice occupies: two, four, or -- a drum -- one. */
+  #allSlotsOf(voice) {
+    const slots = this.#slotsOf(voice).filter((s) => s !== 255);
+    if (!this.voiceFourOp[voice]) return slots;
+    return slots.concat(this.#map().slots[this.#map().four.partner[voice]]);
+  }
+
+  /** §10. Join or split one channel pair, and remember which voices are wide. */
+  #setFourOp(pairIndex, voice, on) {
+    const map = this.#map();
+    const partner = map.four.partner[voice];
+    const bit = 1 << pairIndex;
+    const wanted = on ? (this.fourOpBits | bit) : (this.fourOpBits & ~bit);
+    this.voiceFourOp[voice] = on ? 1 : 0;
+    this.voiceFourOp[partner] = 0;              // the slave is never a voice itself
+    if (wanted === this.fourOpBits) return;
+    this.fourOpBits = wanted;
+    this.chip.write(REG_FOUROP, this.fourOpBits);
   }
 
   #setSlot(slot, params, waveSel) {
@@ -1727,35 +2936,96 @@ class AdlibDriver {
     this.#sendWaveSelect(slot);
   }
 
-  /** §4. The three-way condition is the whole point of this routine. */
+  /**
+   * §4. The three-way condition is the whole point of this routine: channel
+   * volume scales the operators that reach the output and leaves the ones that
+   * only modulate alone, because scaling a modulator changes the timbre rather
+   * than the level.
+   *
+   * §10 adds the four-operator reading of "reaches the output", which the two
+   * halves' connection bits choose between; `#chainPosition` works out which
+   * of the four an operator is.
+   */
   #sendKslLevel(slot) {
     const p = this.slotParams[slot];
     const voice = this.#voiceOfSlot(slot);
     let amplitude = 63 - (p[P_LEVEL] & 63);
-    const singleSlot = this.percussion && voice > BD;
-    if (SLOT_IS_CARRIER[slot] || !p[P_CONNECTION] || singleSlot) {
+    if (this.#isOutputSlot(slot, voice)) {
       amplitude = (amplitude * this.voiceVolume[voice] + (MAX_VOLUME + 1) / 2) >> 7;
     }
     const value = (63 - amplitude) | ((p[P_KSL] & 3) << 6);
-    this.chip.write(0x40 + SLOT_OFFSET[slot], value);
+    this.chip.write(0x40 + this.slotRegister[slot], value);
+  }
+
+  /** Whether channel volume applies to this operator. §4, §10. */
+  #isOutputSlot(slot, voice) {
+    const position = this.#chainPosition(slot, voice);
+    if (position === NOT_FOUR) {
+      const singleSlot = this.percussion && voice > this.bd;
+      return !!this.slotCarrier[slot] || !this.slotParams[slot][P_CONNECTION] || singleSlot;
+    }
+    // §10: reading each half's connection bit as "this half's first operator
+    // goes straight to the output" names the outputs of all four connections.
+    const map = this.#map();
+    const head = this.#slotsOf(voice);
+    const slave = this.#slotsOf(map.four.partner[voice]);
+    const cnt1 = !this.slotParams[head[0]][P_CONNECTION];
+    const cnt2 = !this.slotParams[slave[0]][P_CONNECTION];
+    switch (position) {
+      case OP1: return cnt1;
+      case OP2: return false;
+      case OP3: return cnt2;
+      default: return true;                     // OP4 is always an output
+    }
+  }
+
+  /** Where a slot sits in its voice's four-operator chain, if it is in one. */
+  #chainPosition(slot, voice) {
+    if (voice < 0 || !this.voiceFourOp[voice]) return NOT_FOUR;
+    const map = this.#map();
+    const head = this.#slotsOf(voice);
+    const slave = this.#slotsOf(map.four.partner[voice]);
+    if (slot === head[0]) return OP1;
+    if (slot === head[1]) return OP2;
+    if (slot === slave[0]) return OP3;
+    if (slot === slave[1]) return OP4;
+    return NOT_FOUR;
+  }
+
+  /** Which voice is currently using a slot, or -1 while none is. */
+  #voiceOfSlot(slot) {
+    const map = this.#map();
+    const v = map.voiceOfSlot[slot];
+    if (v < 0) return -1;
+    // The slave half of a joined pair belongs to its head's voice: that is
+    // whose volume and whose patch it is carrying.
+    const partner = map.four.partner[v];
+    return partner >= 0 && this.voiceFourOp[partner] ? partner : v;
   }
 
   #sendFeedbackConnection(slot) {
-    if (SLOT_IS_CARRIER[slot]) return;
+    if (this.slotCarrier[slot]) return;
     const p = this.slotParams[slot];
-    const value = ((p[P_FEEDBACK] & 7) << 1) | (p[P_CONNECTION] ? 0 : 1);
-    this.chip.write(0xc0 + MELODIC_VOICE_OF_SLOT[slot], value);
+    const channel = this.slotChannel[slot];
+    this.channelC0[channel] = ((p[P_FEEDBACK] & 7) << 1) | (p[P_CONNECTION] ? 0 : 1);
+    this.#writeC0(channel);
+  }
+
+  /** §11. One channel's 0xC0: feedback and connection, plus the stereo bits. */
+  #writeC0(channel) {
+    const pan = this.opl3 ? (this.channelPan[channel] & 3) << PAN_SHIFT : 0;
+    this.#writeChannel(0xc0, channel, this.channelC0[channel] | pan);
   }
 
   #sendAttackDecay(slot) {
     const p = this.slotParams[slot];
-    this.chip.write(0x60 + SLOT_OFFSET[slot],
+    this.chip.write(0x60 + this.slotRegister[slot],
       ((p[P_ATTACK] & 0x0f) << 4) | (p[P_DECAY] & 0x0f));
   }
 
   #sendSustainRelease(slot) {
     const p = this.slotParams[slot];
-    this.chip.write(0x80 + SLOT_OFFSET[slot],
+    this.chip.write(0x80 + this.slotRegister[slot],
       ((p[P_SUSTAIN] & 0x0f) << 4) | (p[P_RELEASE] & 0x0f));
   }
 
@@ -1763,18 +3033,31 @@ class AdlibDriver {
     const p = this.slotParams[slot];
     const value = (p[P_AM] ? 0x80 : 0) | (p[P_VIB] ? 0x40 : 0) |
       (p[P_EG] ? 0x20 : 0) | (p[P_KSR] ? 0x10 : 0) | (p[P_MULTIPLE] & 0x0f);
-    this.chip.write(0x20 + SLOT_OFFSET[slot], value);
+    this.chip.write(0x20 + this.slotRegister[slot], value);
   }
 
+  /**
+   * §3. An OPL3 has eight waveforms and an OPL2 four, so the patch's own
+   * setting is masked by what the chip can reach rather than by what the file
+   * happens to hold. A `.sop` stores OPL3 wave selects (SOP §3.2); on a YM3812
+   * they become whichever of the first four share their low two bits.
+   */
   #sendWaveSelect(slot) {
-    const wave = this.waveSelect ? this.slotParams[slot][13] & 3 : 0;
-    this.chip.write(0xe0 + SLOT_OFFSET[slot], wave);
+    const mask = this.opl3 ? 7 : 3;
+    const wave = this.waveSelect ? this.slotParams[slot][13] & mask : 0;
+    this.chip.write(0xe0 + this.slotRegister[slot], wave);
   }
 
   #sendAmVibRhythm() {
     const value = (this.amDepth ? 0x80 : 0) | (this.vibDepth ? 0x40 : 0) |
       (this.percussion ? 0x20 : 0) | this.percBits;
     this.chip.write(0xbd, value);
+  }
+
+  /** A per-channel register, in whichever bank the channel lives. */
+  #writeChannel(base, channel, value) {
+    const bank = channel >= CHANNEL_COUNT ? BANK_STRIDE : 0;
+    this.chip.write(base + (channel % CHANNEL_COUNT) + bank, value);
   }
 
   /** §5.2. */
@@ -1798,9 +3081,15 @@ class AdlibDriver {
     if (block < 0) { block++; entry >>= 1; }
     const fnum = entry & 0x3ff;
 
-    this.chip.write(0xa0 + voice, fnum & 0xff);
+    const map = this.#map();
     const bx = keyOn | ((block & 7) << 2) | ((fnum >> 8) & 3);
-    this.chip.write(0xb0 + voice, bx);
+    const channels = this.voiceFourOp[voice]
+      ? [map.channel[voice], map.channel[map.four.partner[voice]]]
+      : [map.channel[voice]];
+    for (const channel of channels) {
+      this.#writeChannel(0xa0, channel, fnum & 0xff);
+      this.#writeChannel(0xb0, channel, bx);
+    }
     return bx;
   }
 }
@@ -1817,23 +3106,45 @@ class AdlibDriver {
 
 /** Event kinds a sequencer understands. */
 const NOTE_ON = 0, NOTE_OFF = 1, VOLUME = 2, PATCH = 3, BEND = 4,
-  TEMPO = 5, END = 6;
+  TEMPO = 5, END = 6, PAN = 7;
+
+/** @typedef {import("./formats.js").Patch} Patch */
+
+/**
+ * One instruction for the driver, at an absolute tick. Both formats reduce to
+ * this: `type` says which of the constants above it is, and the rest of the
+ * fields are whichever that kind uses.
+ *
+ * @typedef {object} SeqEvent
+ * @property {number} tick
+ * @property {number} type one of NOTE_ON..END
+ * @property {number} [voice]
+ * @property {number} [note] MIDI note number
+ * @property {number} [volume] 0..127
+ * @property {number|Patch} [patch] an index into `patches` (IMS) or the patch itself (ROL)
+ * @property {number} [bend] 14-bit, 0x2000 centred
+ * @property {number} [pan] one of the PAN_* values; ignored by a mono chip
+ * @property {number} [tempo] beats per minute
+ * @property {number} [order] tie-break within a tick, for ROL's parallel tracks
+ */
 
 class Sequencer {
   /**
    * @param {object} opts
    * @param {{write(reg:number,value:number):void}} opts.chip
-   * @param {Iterable<object>} opts.events  absolute-tick events, in order
+   * @param {Iterable<SeqEvent>} opts.events  absolute-tick events, in order
    * @param {number} opts.tickBeat          ticks per beat
    * @param {number} opts.tempo             beats per minute
    * @param {boolean} opts.percussive
    * @param {number} [opts.pitchRange]
-   * @param {Array} [opts.patches]          resolved bank patches, by index
+   * @param {(Patch|null)[]} [opts.patches] resolved bank patches, by index
    * @param {number} [opts.sampleRate]      defaults to the chip's native rate
+   * @param {boolean} [opts.opl3]           drive the chip as a YMF262;
+   *   defaults to whatever the chip says it is
    */
   constructor(opts) {
     this.chip = opts.chip;
-    this.driver = new AdlibDriver(opts.chip);
+    this.driver = new AdlibDriver(opts.chip, { opl3: opts.opl3 ?? !!opts.chip.opl3 });
     this.makeEvents = opts.events;
     this.tickBeat = opts.tickBeat || 240;
     this.baseTempo = opts.tempo || 120;
@@ -1849,17 +3160,22 @@ class Sequencer {
     this.driver.reset();
     this.driver.setMode(this.percussive);
     this.driver.setPitchRange(this.pitchRange);
+    /** @type {number} */
     this.tempo = this.baseTempo;
     this.iterator = this.makeEvents[Symbol.iterator]();
     this.pending = this.iterator.next();
+    /** @type {number} */
     this.tick = 0;
     this.sampleCursor = 0;      // fractional samples owed before the next event
     this.samplesRendered = 0;
+    /** @type {boolean} */
     this.ended = false;
     // What each voice is currently set to, for anything showing the player
     // its own state. The epoch saves a display from diffing eleven strings a
     // frame when patch changes are a handful an entire song.
-    this.voicePatchName = new Array(11).fill("");
+    /** @type {string[]} */
+    this.voicePatchName = new Array(METER_VOICES).fill("");
+    /** @type {number} */
     this.patchEpoch = (this.patchEpoch | 0) + 1;   // never repeats, so a reset shows
   }
 
@@ -1903,6 +3219,9 @@ class Sequencer {
       case BEND:
         d.setVoicePitch(ev.voice, ev.bend);
         break;
+      case PAN:
+        d.setVoicePan(ev.voice, ev.pan);
+        break;
       case TEMPO:
         this.tempo = ev.tempo;
         break;
@@ -1935,15 +3254,36 @@ class Sequencer {
     this.tick = 0;
     this.ended = false;
     this.tempo = this.baseTempo;
-    for (let v = 0; v <= (this.percussive ? HH : 8); v++) this.driver.noteOff(v);
+    for (let v = 0; v < this.driver.voiceCount; v++) this.driver.noteOff(v);
   }
 
   /**
    * Render `count` samples of the song into `out` at `offset`.
    * Returns the number of samples actually written -- short only at the end
    * of a non-looping song.
+   *
+   * @param {Float32Array} out
+   * @param {number} offset
+   * @param {number} count
+   * @returns {number}
    */
   render(out, offset, count) {
+    return this.#run(out, null, offset, count);
+  }
+
+  /**
+   * The same, as two channels. Only a chip with the stereo switches has
+   * anything different to put in them; see `OplChip.generateStereo`.
+   *
+   * @param {Float32Array} left @param {Float32Array} right
+   * @param {number} offset @param {number} count
+   * @returns {number}
+   */
+  renderStereo(left, right, offset, count) {
+    return this.#run(left, right, offset, count);
+  }
+
+  #run(out, right, offset, count) {
     let written = 0;
     while (written < count) {
       if (this.sampleCursor <= 0) {
@@ -1957,17 +3297,25 @@ class Sequencer {
         this.tick = nextTick;
       }
       const run = Math.min(count - written, Math.max(1, Math.floor(this.sampleCursor)));
-      this.chip.generate(out, offset + written, run);
+      if (right) this.chip.generateStereo(out, right, offset + written, run);
+      else this.chip.generate(out, offset + written, run);
       this.sampleCursor -= run;
       this.samplesRendered += run;
       written += run;
     }
-    if (written < count) out.fill(0, offset + written, offset + count);
+    if (written < count) {
+      out.fill(0, offset + written, offset + count);
+      if (right) right.fill(0, offset + written, offset + count);
+    }
     return written;
   }
 }
 
-/** Flatten an IMS song into sequencer events. §1.4 of the formats doc. */
+/**
+ * Flatten an IMS song into sequencer events. §1.4 of the formats doc.
+ * @param {import("./formats.js").ImsSong} song
+ * @returns {Generator<SeqEvent, void, undefined>}
+ */
 function* imsSequence(song) {
   const melodicOnly = !song.percussive;
   for (const ev of imsEvents(song)) {
@@ -2010,6 +3358,10 @@ function* imsSequence(song) {
  * Flatten a ROL song into sequencer events. §3 of the formats doc.
  * `resolve` maps an instrument name to a bank patch; unresolved names are
  * dropped rather than silencing the voice.
+ *
+ * @param {import("./formats.js").RolSong} song
+ * @param {(name: string) => (Patch|null)} resolve
+ * @returns {SeqEvent[]}
  */
 function rolSequence(song, resolve) {
   const out = [];
@@ -2043,6 +3395,291 @@ function rolSequence(song, resolve) {
   return out;
 }
 
+/**
+ * The voice layout `sopSequence` writes for when it is given none: a YM3812,
+ * which is what this library ran a SOP on before there was an OPL3 core.
+ * @param {import("./formats.js").SopSong} song
+ */
+function opl2Layout(song) {
+  return {
+    melodicVoices: song.percussive ? BD : 9,
+    rhythmBase: BD,
+    fourOpPairs: [],
+  };
+}
+
+/**
+ * SOP §4.2 panning: 0 is right, 1 is middle, 2 is left. Anything else is one
+ * of the three corrupt events the corpus carries, and goes to the middle.
+ */
+function sopPan(value) {
+  return value === 0 ? PAN_RIGHT : value === 2 ? PAN_LEFT : PAN_CENTRE;
+}
+
+/**
+ * Flatten a SOP song into sequencer events. SOP §8.
+ *
+ * `layout` says what the chip underneath actually has, and everything that
+ * follows is a consequence of it:
+ *
+ * - **Rhythm tracks keep their voice.** In percussive mode, track slots 6..10
+ *   are the bass drum, snare, tom, cymbal and hi-hat, which the corpus shows
+ *   plainly (SOP §7), and those map one to one onto the five rhythm voices
+ *   wherever the chip puts them -- 6..10 on a YM3812, 15..19 on a YMF262.
+ * - **Four-operator tracks get a four-operator voice, while there are any.**
+ *   SOP §2 marks each track's kind in the channel-mode table, and mode 1 is
+ *   the YMF262's four-operator channel. A chip offers at most six of those and
+ *   each costs two channels, so the mode-1 tracks take them in track order and
+ *   any left over fall back to two operators. The voice is fixed for the whole
+ *   song rather than allocated per note: joining and splitting a channel pair
+ *   is a register write that reaches the whole pair, so a wide voice that came
+ *   and went would take a narrow one with it.
+ * - **Everything else shares what is left**, allocated per note. A track keeps
+ *   its voice while its note sounds; when every voice is busy the one whose
+ *   note ends soonest is cut short, because that is the note that had least
+ *   left to lose. On a YMF262 in rhythm mode with no four-operator tracks
+ *   there are fifteen of those and five drums, which is exactly the twenty the
+ *   format asks for, and nothing is cut at all.
+ * - **Panning is a voice setting**, so it is emitted per voice rather than per
+ *   track, and lands wherever the track's notes landed. A mono chip drops it.
+ *
+ * On a nine-voice chip this is still a reduction -- 298 of the 336 corpus files
+ * ask for more melodic voices than an OPL2 has -- and passing no layout is how
+ * to ask for that reduction on purpose.
+ *
+ * @param {import("./formats.js").SopSong} song
+ * @param {{melodicVoices:number, rhythmBase:number, fourOpPairs:number[][]}} [layout]
+ * @returns {SeqEvent[]}
+ */
+function sopSequence(song, layout) {
+  const percussive = song.percussive;
+  const plan = layout ?? opl2Layout(song);
+  const melodicVoices = plan.melodicVoices;
+  const rhythmBase = plan.rhythmBase;
+  const voiceSlots = Math.max(melodicVoices, rhythmBase + RHYTHM_VOICES);
+  const patches = song.instruments.map(sopPatch);
+  const nTracks = song.tracks.length;
+
+  // §4.1: the five rhythm tracks are track slots 6..10 whatever the chip is.
+  // Those are numbers the format fixes, not the chip.
+  const rhythmVoiceOf = (t) =>
+    (percussive && t >= 6 && t < 6 + RHYTHM_VOICES ? rhythmBase + (t - 6) : -1);
+
+  // §2: hand the four-operator channel pairs to the tracks that asked for one.
+  //
+  // Two ways of asking, and the file can do either: the channel-mode table
+  // says 1, or the track selects a type-0 instrument. Mode is the format's own
+  // declaration so it goes first, but instrument choice cannot be ignored --
+  // four corpus files select a four-operator instrument on a track they never
+  // marked, and they mean it just as much.
+  const wantsFour = (t) => {
+    if (rhythmVoiceOf(t) >= 0) return 0;
+    if ((song.tracks[t].mode & 0x7f) === 1) return 2;
+    for (const ev of song.tracks[t].events) {
+      if (ev.code === 6 && patches[ev.value] && patches[ev.value].pair) return 1;
+    }
+    return 0;
+  };
+  const wideOf = new Array(nTracks).fill(-1);
+  const spokenFor = new Set();
+  const pairs = (plan.fourOpPairs ?? [])
+    .filter(([head, slave]) => head < melodicVoices && slave < melodicVoices);
+  const asking = [];
+  for (let t = 0; t < nTracks; t++) {
+    const want = wantsFour(t);
+    if (want) asking.push({ t, want });
+  }
+  // Declared first, then merely implied, and inside each in track order -- so
+  // which tracks lose out when there are more than six is a property of the
+  // file rather than of the order this loop happens to run in.
+  asking.sort((a, b) => b.want - a.want || a.t - b.t);
+  asking.slice(0, pairs.length).forEach(({ t }, i) => {
+    const [head, slave] = pairs[i];
+    wideOf[t] = head;
+    spokenFor.add(head);
+    spokenFor.add(slave);
+  });
+  /** The voices left for ordinary two-operator notes to share. */
+  const pool = [];
+  for (let v = 0; v < melodicVoices; v++) if (!spokenFor.has(v)) pool.push(v);
+
+  // Joining a channel pair is a register write that silences the slave, so a
+  // four-operator patch must never reach a voice the plan did not set aside --
+  // it would take a voice another track is playing on with it. Anywhere else
+  // the instrument is played on its first operator pair, which is what a
+  // YM3812 does with it too (SOP §8).
+  const narrowed = patches.map((p) => (p && p.pair ? { ...p, pair: undefined } : p));
+  const wideVoices = new Set(pairs.slice(0, asking.length).map(([head]) => head));
+  const patchFor = (voice, index) =>
+    (wideVoices.has(voice) ? patches : narrowed)[index];
+
+  // Merge every track with the control track, keeping file order inside each.
+  // Array.prototype.sort is stable, so sorting on (tick, source) alone leaves
+  // a track's own events in the order it stored them -- which matters, because
+  // a SOP sets the patch, volume and pitch of a note in the tick before it.
+  const merged = [];
+  for (const ev of song.control) merged.push({ ev, track: -1, source: 0 });
+  for (let t = 0; t < nTracks; t++) {
+    for (const ev of song.tracks[t].events) merged.push({ ev, track: t, source: 1 });
+  }
+  merged.sort((a, b) => a.ev.tick - b.ev.tick || a.source - b.source);
+
+  const out = [];
+  let globalVolume = 127;
+  const trackPatch = new Array(nTracks).fill(-1);
+  const trackVolume = new Array(nTracks).fill(127);
+  const trackBend = new Array(nTracks).fill(100);     // §4.2: 100 is centre
+  const trackPan = new Array(nTracks).fill(-1);
+  const trackVoice = new Array(nTracks).fill(-1);
+  const touched = new Array(nTracks).fill(false);
+  const voiceTrack = new Array(voiceSlots).fill(-1);
+  const voiceEnd = new Int32Array(voiceSlots);
+  const voicePan = new Array(voiceSlots).fill(-1);
+  /** The note-off already emitted for each voice, so that a steal can pull it in. */
+  const voiceOff = new Array(voiceSlots).fill(null);
+  // -2 is "nothing loaded". A track that never sends an instrument-select still
+  // has to make a sound: ST-BGM.SOP has 4878 notes and not one event 6, so it
+  // is relying on whatever the editor had loaded. The first instrument that
+  // yields a patch is the least-invented stand-in for that, and using its own
+  // index rather than a sentinel keeps the "already loaded" check honest.
+  const voicePatch = new Array(voiceSlots).fill(-2);
+  const fallbackIndex = patches.findIndex((p) => p);
+
+  // §4.2: volume is 0..127 and so is the driver's, but the control track's
+  // global volume scales all of it, and that is how SOP fades a whole song.
+  const volumeOf = (t) => Math.round((trackVolume[t] * globalVolume) / 127);
+  // §4.2: pitch is 0..200 about a centre of 100, which is one semitone either
+  // way -- exactly the driver's 14-bit bend at a pitch range of 1.
+  const bendOf = (t) => {
+    const v = MID_PITCH + Math.round(((trackBend[t] - 100) * MID_PITCH) / 100);
+    return v < 0 ? 0 : v > 0x3fff ? 0x3fff : v;
+  };
+
+  const emitVolume = (tick, voice, t) =>
+    out.push({ tick, type: VOLUME, voice, volume: volumeOf(t), order: 2 });
+  /** Panning belongs to the voice, so it is only worth sending when it moves. */
+  const emitPan = (tick, voice, t) => {
+    if (trackPan[t] < 0 || voicePan[voice] === trackPan[t]) return;
+    voicePan[voice] = trackPan[t];
+    out.push({ tick, type: PAN, voice, pan: sopPan(trackPan[t]), order: 2 });
+  };
+
+  /** The voice a track owns outright: a drum's, or a four-operator one. */
+  const fixedVoiceOf = (t) => {
+    const rhythm = rhythmVoiceOf(t);
+    return rhythm >= 0 ? rhythm : wideOf[t];
+  };
+
+  /** A voice for a melodic track's note: its own, a free one, or a stolen one. */
+  const allocate = (t, tick) => {
+    const own = trackVoice[t];
+    if (own >= 0 && voiceTrack[own] === t) return own;
+    for (const v of pool) if (voiceTrack[v] < 0 || voiceEnd[v] <= tick) return v;
+    let best = pool[0];
+    for (const v of pool) if (voiceEnd[v] < voiceEnd[best]) best = v;
+    return best;
+  };
+
+  let lastTick = 0;
+  for (const { ev, track } of merged) {
+    lastTick = ev.tick;
+    if (track < 0) {
+      if (ev.code === 3) {                                   // §5: tempo, in bpm
+        out.push({ tick: ev.tick, type: TEMPO, tempo: ev.value, order: 0 });
+      } else if (ev.code === 8) {                            // §5: global volume
+        globalVolume = ev.value;
+        for (let t = 0; t < nTracks; t++) {
+          if (!touched[t]) continue;
+          const voice = fixedVoiceOf(t);
+          if (voice >= 0) emitVolume(ev.tick, voice, t);
+          else if (trackVoice[t] >= 0 && voiceTrack[trackVoice[t]] === t) {
+            emitVolume(ev.tick, trackVoice[t], t);
+          }
+        }
+      }
+      continue;
+    }
+    touched[track] = true;
+    const fixed = fixedVoiceOf(track);
+    const held = fixed >= 0
+      ? fixed
+      : (trackVoice[track] >= 0 && voiceTrack[trackVoice[track]] === track
+        ? trackVoice[track] : -1);
+
+    switch (ev.code) {
+      case 6:                                                // §4.2: instrument
+        trackPatch[track] = ev.value;
+        if (held >= 0 && voicePatch[held] !== ev.value && patches[ev.value]) {
+          out.push({ tick: ev.tick, type: PATCH, voice: held, patch: patchFor(held, ev.value), order: 1 });
+          voicePatch[held] = ev.value;
+        }
+        break;
+      case 4:                                                // §4.2: volume
+        trackVolume[track] = ev.value;
+        if (held >= 0) emitVolume(ev.tick, held, track);
+        break;
+      case 5:                                                // §4.2: pitch
+        trackBend[track] = ev.value;
+        if (held >= 0) out.push({ tick: ev.tick, type: BEND, voice: held, bend: bendOf(track), order: 2 });
+        break;
+      case 7:                                                // §4.2: panning
+        trackPan[track] = ev.value;
+        if (held >= 0) emitPan(ev.tick, held, track);
+        break;
+      case 2: {                                              // §4.2: note on
+        // §4.2 gives a note its length up front, which is what makes a static
+        // allocator possible at all: the sequencer knows when each voice frees.
+        const length = Math.max(1, ev.length ?? 1);
+        const endTick = ev.tick + length;
+        let voice = fixed;
+        if (voice < 0) {
+          voice = allocate(track, ev.tick);
+          const previous = voiceTrack[voice];
+          if (previous >= 0 && previous !== track) trackVoice[previous] = -1;
+          voiceTrack[voice] = track;
+          voiceEnd[voice] = endTick;
+          trackVoice[track] = voice;
+        }
+        // Cutting the outgoing note-off back to now is the whole of the steal:
+        // note-offs sort ahead of note-ons, so the voice is free in time. A
+        // rhythm voice needs it just as much -- two hits on one drum inside a
+        // note's length would otherwise have the first one's off cut the second.
+        if (voiceOff[voice] && voiceOff[voice].tick > ev.tick) voiceOff[voice].tick = ev.tick;
+        const chosen = trackPatch[track] >= 0 && patches[trackPatch[track]]
+          ? trackPatch[track] : fallbackIndex;
+        const patch = chosen >= 0 ? patchFor(voice, chosen) : null;
+        if (patch && voicePatch[voice] !== chosen) {
+          out.push({ tick: ev.tick, type: PATCH, voice, patch, order: 1 });
+          voicePatch[voice] = chosen;
+        }
+        emitVolume(ev.tick, voice, track);
+        emitPan(ev.tick, voice, track);
+        out.push({ tick: ev.tick, type: BEND, voice, bend: bendOf(track), order: 2 });
+        out.push({ tick: ev.tick, type: NOTE_ON, voice, note: ev.value, order: 4 });
+        const off = { tick: endTick, type: NOTE_OFF, voice, order: 3 };
+        out.push(off);
+        voiceOff[voice] = off;
+        break;
+      }
+      default:
+        // §4.2: 1 is the "special event" nobody has ever explained -- 7 of it
+        // in the whole corpus. It is dropped rather than guessed at.
+        break;
+    }
+  }
+
+  // Tempo, then patch, then volume and pitch, then note-offs, then note-ons --
+  // so a note hears its own setup, and so a voice taken back from another track
+  // is released before it is keyed again.
+  out.sort((a, b) => a.tick - b.tick || a.order - b.order);
+  // The end comes off the sorted array, not off the last event read: a note
+  // started on the final tick still has its length to run, and ending the song
+  // at the last *input* tick would cut it off.
+  const last = out.length ? out[out.length - 1].tick : lastTick;
+  out.push({ tick: last + 1, type: END, order: 9 });
+  return out;
+}
+
 // == src/player.js ==
 // The public entry point: files in, audio out.
 //
@@ -2057,6 +3694,22 @@ function rolSequence(song, resolve) {
 
 
 
+
+
+/** @typedef {import("./formats.js").Patch} Patch */
+
+/** Output scale by chip, before the caller overrides it. See `headroom` below. */
+const DEFAULT_GAIN = { opl2: 0.55, opl3: 0.32 };
+
+/**
+ * The lyric text that should be lit at a given tick, and how much of it.
+ * `from` and `to` are character cells into `text`, not string indices.
+ * @typedef {object} LyricSpan
+ * @property {number} line index into the ISS's lines
+ * @property {string} text the whole line
+ * @property {number} from @property {number} to
+ */
+
 /**
  * A loaded song, ready to render.
  *
@@ -2067,11 +3720,17 @@ function rolSequence(song, resolve) {
 class IyagiMusic {
   /**
    * @param {object} opts
-   * @param {Uint8Array} opts.song           .ims or .rol bytes
-   * @param {Uint8Array} [opts.bank]         .bnk bytes, song-specific
+   * @param {Uint8Array} opts.song           .ims, .rol or .sop bytes
+   * @param {Uint8Array} [opts.bank]         .bnk bytes, song-specific; a .sop needs none
    * @param {Uint8Array} [opts.fallbackBank] .bnk bytes, the general bank
    * @param {Uint8Array} [opts.lyrics]       .iss bytes
    * @param {number} [opts.sampleRate]       output rate; default 48000
+   * @param {"auto"|"opl2"|"opl3"} [opts.chip]
+   *   which chip to play the song on. "auto" -- the default -- gives a `.sop`
+   *   the YMF262 it was written for and everything else the YM3812 it was
+   *   written for. "opl2" forces the nine-voice reduction a `.sop` used to get
+   *   (SOP §8), which is worth having for comparison and for nothing else.
+   * @param {number} [opts.gain]             output scale; default by chip, see below
    * @param {(code:number)=>string|null} [opts.userGlyph]
    *   overrides the built-in mapping for Iyagi's own font glyphs
    *   (JOHAB_ENCODING §5). They decode to their Unicode equivalents now, so
@@ -2080,7 +3739,7 @@ class IyagiMusic {
    */
   constructor(opts) {
     const kind = identify(opts.song);
-    if (kind !== "ims" && kind !== "rol") {
+    if (kind !== "ims" && kind !== "rol" && kind !== "sop") {
       throw new Error("not a playable song file");
     }
     this.kind = kind;
@@ -2089,7 +3748,15 @@ class IyagiMusic {
     this.bank = opts.bank ? parseBnk(opts.bank) : null;
     this.fallbackBank = opts.fallbackBank ? parseBnk(opts.fallbackBank) : null;
     this.lyrics = opts.lyrics ? parseIss(opts.lyrics, this.textOptions) : null;
-    this.chip = new OPL2();
+    // A `.sop` is an OPL3 format (SOP §1) and an `.ims` or `.rol` is an AdLib
+    // one; nothing has to be guessed here, only honoured.
+    const want = opts.chip ?? "auto";
+    if (want !== "auto" && want !== "opl2" && want !== "opl3") {
+      throw new Error(`unknown chip ${JSON.stringify(want)}: use "auto", "opl2" or "opl3"`);
+    }
+    /** @type {"opl2"|"opl3"} */
+    this.chipKind = want === "auto" ? (kind === "sop" ? "opl3" : "opl2") : want;
+    this.chip = this.chipKind === "opl3" ? new OPL3() : new OPL2();
 
     if (kind === "ims") {
       this.song = parseIms(opts.song, this.textOptions);
@@ -2103,6 +3770,22 @@ class IyagiMusic {
         percussive: this.song.percussive,
         pitchRange: this.song.pitchRange,
         patches: this.patches,
+      });
+    } else if (kind === "sop") {
+      // A SOP carries its own instruments, so there is no bank to resolve and
+      // nothing that can go missing. How its twenty tracks are laid over the
+      // chip's voices is `sopSequence`'s business, and SOP §8 spells it out.
+      this.song = parseSop(opts.song, this.textOptions);
+      this.missing = [];
+      this.sequencer = new Sequencer({
+        chip: this.chip,
+        events: sopSequence(this.song,
+          voiceLayout(this.chipKind === "opl3", this.song.percussive)),
+        tickBeat: this.song.tickBeat,
+        tempo: this.song.basicTempo || 120,   // SOP §1: one corpus file says 0
+        percussive: this.song.percussive,
+        pitchRange: 1,                        // SOP §4.2: pitch 0..200 is ±1 semitone
+        patches: [],
       });
     } else {
       this.song = parseRol(opts.song, this.textOptions);
@@ -2125,15 +3808,48 @@ class IyagiMusic {
       });
     }
 
-    // Nine channels summing into one mono bus can reach about 1.4 when a song
-    // uses every voice at full level, and the chip's own DAC would clip there
-    // too. Back off instead, and clamp what still overshoots.
-    this.gain = opts.gain ?? 0.7;
+    /**
+     * Nine channels summing into one bus can reach about 1.4 when a song uses
+     * every voice at full level, and the chip's own DAC would clip there too.
+     * Back off instead, and clamp what still overshoots.
+     *
+     * An OPL3 song reaches further, because it has more than twice the voices
+     * and each one is exactly as loud (see MIX_SCALE in `opl/chip.js`). Voices
+     * not playing the same note sum in power rather than in amplitude, so the
+     * derivation says √(9/20) = 0.67 of the OPL2's figure -- and the corpus
+     * says 0.58. The derivation is a good first guess about uncorrelated
+     * voices; real songs put their loudest voices on the same beat.
+     *
+     * **Both numbers are measured, and both were re-measured when the bus got
+     * louder.** Summing the rhythm channels twice, as the chip does, put 6 dB
+     * more into every rhythm-mode song, which is most of them; the figures
+     * before that were 0.7 and 0.42. The protocol is the same either way: two
+     * seconds of every corpus song, counting the samples the clamp has to
+     * catch, and the standard is that no file loses more than 0.1% of them.
+     *
+     * | gain | over 0.1% | worst file |
+     * |---|---|---|
+     * | 1366 `.ims` at 0.70 | 7 files | `HOOT!!!.IMS`, 0.840% |
+     * | …at 0.60 | 1 file | 0.237% |
+     * | **…at 0.55** | **none** | **0.098%** |
+     * | 336 `.sop` at 0.42 | 1 file | `MEGATON2.SOP`, 1.938% |
+     * | …at 0.36 | 1 file | 0.187% |
+     * | **…at 0.32** | **none** | **0.022%** |
+     *
+     * @type {number}
+     */
+    this.headroom = opts.gain ?? DEFAULT_GAIN[this.chipKind];
+    /** @type {number} the scale actually applied; `volume` moves it. */
+    this.gain = this.headroom;
     this.ratio = NATIVE_RATE / this.sampleRate;
-    this.nativeBuf = new Float32Array(2048);
+    /** Whether the chip has two output buses. Set once the driver has run. */
+    this.stereo = !!this.chip.stereo;
+    this.nativeL = new Float32Array(2048);
+    this.nativeR = this.stereo ? new Float32Array(2048) : this.nativeL;
     this.nativeLen = 0;
     this.nativePos = 0;
-    this.prevSample = 0;
+    this.prevL = 0;
+    this.prevR = 0;
     this.frac = 0;
   }
 
@@ -2141,6 +3857,16 @@ class IyagiMusic {
   get title() {
     return this.kind === "ims" ? this.song.title : this.song.title;
   }
+
+  /**
+   * Output volume as a fraction of the chip's headroom, 0…1 and 1 by default.
+   *
+   * A listener's volume control wants this rather than `gain`: how much of the
+   * chip's range is safe to use depends on the chip, and a slider that means
+   * "0.7" means something different on nine voices than on twenty.
+   */
+  get volume() { return this.gain / this.headroom; }
+  set volume(v) { this.gain = this.headroom * (v > 0 ? v : 0); }
 
   /** Whether the song has run past its end marker. */
   get ended() { return this.sequencer.ended && this.nativePos >= this.nativeLen; }
@@ -2156,7 +3882,11 @@ class IyagiMusic {
 
   // ── what the player looks like from outside ─────────────────────────────
 
-  /** How many voices this song has: 9 melodic, or 6 melodic and 5 drums. */
+  /**
+   * How many voices this song has: 9 melodic or 6 + 5 drums on a YM3812,
+   * 18 melodic or 15 + 5 on a YMF262. It is also how many meter rows
+   * `readMeters` fills, and the five drums are always the last five of them.
+   */
   get voiceCount() { return this.sequencer.driver.voiceCount; }
 
   /** Chip-wide switches, as the CF_* bits. */
@@ -2172,11 +3902,16 @@ class IyagiMusic {
   /**
    * Per-voice meter rows for a display; see `OPL2.readMeters`, which does most
    * of it. Reading clears the peak accumulators, so call it once per frame.
+   *
+   * @param {Float32Array} out from `IyagiMusic.meterBuffer()`
+   * @returns {Float32Array} the same buffer
    */
   readMeters(out) {
     this.chip.readMeters(out);
     const volume = this.sequencer.driver.voiceVolume;
-    for (let v = 0; v < METER_VOICES; v++) out[v * METER_STRIDE + M_VOLUME] = volume[v];
+    // Only the rows this chip has: past them the driver has no voice to read a
+    // volume off, and writing `undefined` into a Float32Array writes NaN.
+    for (let v = 0; v < this.chip.voiceRows; v++) out[v * METER_STRIDE + M_VOLUME] = volume[v];
     return out;
   }
 
@@ -2185,47 +3920,98 @@ class IyagiMusic {
     this.sequencer.reset();
     this.nativeLen = this.nativePos = 0;
     this.frac = 0;
-    this.prevSample = 0;
+    this.prevL = this.prevR = 0;
   }
 
-  #nextNative() {
+  /** Take the next chip sample into `prevL`/`prevR`, refilling if need be. */
+  #advance() {
     if (this.nativePos >= this.nativeLen) {
-      if (this.sequencer.ended) return 0;
-      this.nativeLen = this.sequencer.render(this.nativeBuf, 0, this.nativeBuf.length);
+      if (this.sequencer.ended) { this.prevL = this.prevR = 0; return; }
+      this.nativeLen = this.stereo
+        ? this.sequencer.renderStereo(this.nativeL, this.nativeR, 0, this.nativeL.length)
+        : this.sequencer.render(this.nativeL, 0, this.nativeL.length);
       this.nativePos = 0;
-      if (this.nativeLen === 0) return 0;
+      if (this.nativeLen === 0) { this.prevL = this.prevR = 0; return; }
     }
-    return this.nativeBuf[this.nativePos++];
+    this.prevL = this.nativeL[this.nativePos];
+    this.prevR = this.nativeR[this.nativePos];
+    this.nativePos++;
+  }
+
+  /**
+   * Resample the chip's stream into one or two caller buffers.
+   * `right` null means mono, and on a stereo chip that is a downmix.
+   */
+  #resample(out, right, offset, count) {
+    const clamp = (v) => Math.fround(v > 1 ? 1 : v < -1 ? -1 : v);
+    for (let i = 0; i < count; i++) {
+      // Linear interpolation between chip samples: the chip's 49716 Hz is not
+      // a neat ratio of any audio device's rate.
+      while (this.frac >= 1) { this.#advance(); this.frac -= 1; }
+      const more = this.nativePos < this.nativeLen;
+      const nextL = more ? this.nativeL[this.nativePos] : this.prevL;
+      const nextR = more ? this.nativeR[this.nativePos] : this.prevR;
+      const l = (this.prevL + (nextL - this.prevL) * this.frac) * this.gain;
+      const r = (this.prevR + (nextR - this.prevR) * this.frac) * this.gain;
+      if (right) {
+        out[offset + i] = clamp(l);
+        right[offset + i] = clamp(r);
+      } else {
+        // A centred voice is in both buses, so on a song that never pans this
+        // is the mono mix exactly; only a panned voice is the 3 dB down that
+        // any mono fold of a stereo mix costs it.
+        out[offset + i] = clamp(this.stereo ? (l + r) / 2 : l);
+      }
+      this.frac += this.ratio;
+    }
   }
 
   /**
    * Fill `out` with mono samples at the requested rate. Returns false once the
    * song has finished and the buffer has been zero-filled.
+   *
+   * @param {Float32Array} out
+   * @param {number} [offset]
+   * @param {number} [count]
+   * @returns {boolean} false once the song has finished
    */
   render(out, offset = 0, count = out.length - offset) {
     if (this.ended) { out.fill(0, offset, offset + count); return false; }
-    for (let i = 0; i < count; i++) {
-      // Linear interpolation between chip samples: the chip's 49716 Hz is not
-      // a neat ratio of any audio device's rate.
-      while (this.frac >= 1) { this.prevSample = this.#nextNative(); this.frac -= 1; }
-      const next = this.nativePos < this.nativeLen
-        ? this.nativeBuf[this.nativePos]
-        : this.prevSample;
-      const v = (this.prevSample + (next - this.prevSample) * this.frac) * this.gain;
-      out[offset + i] = Math.fround(v > 1 ? 1 : v < -1 ? -1 : v);
-      this.frac += this.ratio;
-    }
+    this.#resample(out, null, offset, count);
     return true;
   }
 
-  /** Fill interleaved stereo by duplicating the mono chip output. */
+  /**
+   * Fill both channels. On a YM3812 that is the mono output twice; on a YMF262
+   * it is what the songs's panning asks for (SOP §4.2), which is the whole
+   * reason this method is not just `render` copied.
+   *
+   * @param {Float32Array} left
+   * @param {Float32Array} right
+   * @param {number} [offset]
+   * @param {number} [count]
+   * @returns {boolean}
+   */
   renderStereo(left, right, offset = 0, count = left.length - offset) {
-    const ok = this.render(left, offset, count);
-    right.set(left.subarray(offset, offset + count), offset);
-    return ok;
+    if (this.ended) {
+      left.fill(0, offset, offset + count);
+      right.fill(0, offset, offset + count);
+      return false;
+    }
+    if (!this.stereo) {
+      this.#resample(left, null, offset, count);
+      right.set(left.subarray(offset, offset + count), offset);
+      return true;
+    }
+    this.#resample(left, right, offset, count);
+    return true;
   }
 
-  /** Render the whole song to one array, capped at `maxSeconds`. */
+  /**
+   * Render the whole song to one array, capped at `maxSeconds`.
+   * @param {number} [maxSeconds]
+   * @returns {Float32Array}
+   */
   renderAll(maxSeconds = 600) {
     const cap = Math.ceil(maxSeconds * this.sampleRate);
     const chunks = [];
@@ -2252,6 +4038,9 @@ class IyagiMusic {
    * `{line, text, from, to}` with `from`/`to` in character cells. See
    * `resolveIssSpans` -- a cue marks the right edge of the highlight, not an
    * isolated run.
+   *
+   * @param {number} [tick]
+   * @returns {LyricSpan|null}
    */
   lyricAt(tick = this.tick) {
     if (!this.lyrics) return null;
@@ -2283,7 +4072,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
     this.music = null;
     this.playing = false;
     this.lastReport = 0;
-    this.mono = new Float32Array(128);
+    this.left = new Float32Array(128);
+    this.right = new Float32Array(128);
     // One meter buffer for the life of the processor: postMessage copies it,
     // so it can be refilled every frame without allocating on the audio thread.
     this.meter = IyagiMusic.meterBuffer();
@@ -2301,8 +4091,12 @@ class IyagiProcessor extends AudioWorkletProcessor {
             fallbackBank: msg.fallbackBank,
             lyrics: msg.lyrics,
             sampleRate,
-            gain: msg.gain,
+            chip: msg.chip,
           });
+          // The page's slider is a fraction of the chip's headroom, not an
+          // absolute scale -- an OPL3 song has twenty voices to fit into the
+          // same output as an OPL2 song's nine.
+          if (msg.volume !== undefined) this.music.volume = msg.volume;
           this.music.loop = !!msg.loop;
           this.playing = false;
           this.patchEpoch = -1;
@@ -2313,6 +4107,7 @@ class IyagiProcessor extends AudioWorkletProcessor {
             missing: this.music.missing,
             lyrics: this.music.lyrics,
             tickBeat: this.music.song.tickBeat,
+            chip: this.music.chipKind,
           });
           // One frame of chip status right away, so a display can lay itself
           // out for the right number of voices before anything is played.
@@ -2331,7 +4126,7 @@ class IyagiProcessor extends AudioWorkletProcessor {
         this.#report(true);
         break;
       case "loop": if (this.music) this.music.loop = !!msg.value; break;
-      case "gain": if (this.music) this.music.gain = msg.value; break;
+      case "volume": if (this.music) this.music.volume = msg.value; break;
       default: break;
     }
   }
@@ -2365,9 +4160,16 @@ class IyagiProcessor extends AudioWorkletProcessor {
       for (const ch of out) ch.fill(0);
       return true;
     }
-    if (this.mono.length !== n) this.mono = new Float32Array(n);
-    const running = this.music.render(this.mono, 0, n);
-    for (const ch of out) ch.set(this.mono);
+    if (this.left.length !== n) {
+      this.left = new Float32Array(n);
+      this.right = new Float32Array(n);
+    }
+    // Always the stereo call: on a YM3812 it is the mono stream twice, and on
+    // a YMF262 it is the song's own panning, which is the only place in the
+    // library where the two chips differ audibly rather than in count.
+    const running = this.music.renderStereo(this.left, this.right, 0, n);
+    out[0].set(this.left);
+    for (let c = 1; c < out.length; c++) out[c].set(this.right);
     if (!running) { this.playing = false; this.#report(true); this.port.postMessage({ type: "ended" }); }
     else this.#report(false);
     return true;

@@ -125,18 +125,31 @@ function onWorkletMessage(msg) {
 // ── file intake ───────────────────────────────────────────────────────────
 
 /**
+ * Which song formats name their instruments instead of carrying them, and so
+ * need a `.bnk` alongside. A `.sop` carries its own (SOP §3), which is why it
+ * is the one format that must not be warned about for arriving without one.
+ */
+const NEEDS_BANK = { ims: true, rol: true, sop: false };
+
+/**
  * Sort a dropped batch by what the bytes say, not by the extension: the
  * corpus is full of files whose names lie.
  */
 async function classify(fileList) {
-  const found = { song: null, songName: "", bank: null, bankName: "", lyrics: null };
+  const found = {
+    song: null, songName: "", songKind: "", bank: null, bankName: "", lyrics: null,
+  };
   const banks = [];
   for (const file of fileList) {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    switch (identify(bytes)) {
+    const kind = identify(bytes);
+    switch (kind) {
       case "ims":
       case "rol":
-        if (!found.song) { found.song = bytes; found.songName = file.name; }
+      case "sop":
+        if (!found.song) {
+          found.song = bytes; found.songName = file.name; found.songKind = kind;
+        }
         break;
       case "bnk":
         banks.push({ bytes, name: file.name });
@@ -163,11 +176,17 @@ async function classify(fileList) {
 async function load(fileList) {
   const found = await classify(fileList);
   if (!found.song) {
-    showError("재생할 수 있는 파일이 없습니다. .ims 또는 .rol 파일을 넣어 주세요.");
+    showError("재생할 수 있는 파일이 없습니다. .ims, .rol 또는 .sop 파일을 넣어 주세요.");
     return;
   }
-  // Fall back to the bundled bank when the drop did not include one.
-  if (!found.bank) {
+  // Fall back to the bundled bank when the drop did not include one. A .sop
+  // carries its own instruments (SOP §3), so it needs neither.
+  if (!NEEDS_BANK[found.songKind]) {
+    found.bank = undefined;
+    found.fallbackBank = undefined;
+    found.bankName = "";
+    found.fallbackName = "";
+  } else if (!found.bank) {
     const bytes = await bundledBankBytes();
     if (bytes) { found.bank = bytes; found.bankName = "STANDARD.BNK (내장)"; }
   } else if (!found.fallbackBank) {
@@ -185,7 +204,10 @@ async function load(fileList) {
     fallbackBank: found.fallbackBank,
     lyrics: found.lyrics,
     loop: els.loop.checked,
-    gain: Number(els.gain.value) / 100,
+    // A fraction of the chip's headroom rather than an absolute scale: twenty
+    // OPL3 voices need more room than nine OPL2 ones, and the player knows how
+    // much. See `IyagiMusic.volume`.
+    volume: Number(els.gain.value) / 100,
   });
   // Keep a local copy of the header for the info panel, so the worklet only
   // has to report what it alone knows.
@@ -194,10 +216,15 @@ async function load(fileList) {
   els.stage.dataset.bankName = found.bankName;
   els.stage.dataset.fallbackName = found.fallbackName ?? "";
   // Keep the bytes: the remix button hands the very same pair to Microtone,
-  // so the listener never has to save a file and find it again.
-  loaded = { name: found.songName || "song.ims", song: found.song,
-             bank: found.bank, bankName: found.bankName };
+  // so the listener never has to save a file and find it again. The KIND goes
+  // with them, because the receiving end picks its converter by extension and
+  // `classify` has just finished establishing that the name may not say.
+  loaded = { name: found.songName || "song", kind: found.songKind,
+             song: found.song, bank: found.bank, bankName: found.bankName };
   els.remix?.classList.remove("remix-idle");
+  remixNote(NEEDS_BANK[found.songKind]
+    ? "곡을 열면 음색 뱅크까지 그대로 넘겨 드립니다"
+    : "악기가 곡 안에 들어 있어 파일 하나로 그대로 넘어갑니다");
 }
 
 function showError(message) {
@@ -213,9 +240,15 @@ function showError(message) {
 function showSong(msg) {
   const name = els.stage.dataset.songName || "";
   els.title.textContent = msg.title.trim() || name || "제목 없음";
+  const KINDS = {
+    ims: "IMS (이야기 뮤직 사운드)",
+    rol: "ROL (애드립 Visual Composer)",
+    sop: "SOP (OPL3 트래커)",
+  };
   const rows = [
-    ["형식", msg.kind === "ims" ? "IMS (이야기 뮤직 사운드)" : "ROL (애드립 Visual Composer)"],
+    ["형식", KINDS[msg.kind] ?? msg.kind.toUpperCase()],
     ["파일", name],
+    ["음원", msg.chip === "opl3" ? "YMF262 (OPL3)" : "YM3812 (OPL2)"],
   ];
   if (els.stage.dataset.bankName) {
     const extra = els.stage.dataset.fallbackName;
@@ -232,7 +265,10 @@ function showSong(msg) {
     els.warn.textContent =
       `음색 ${msg.missing.length}개를 뱅크에서 찾지 못했습니다 (${msg.missing.slice(0, 6).join(", ")}` +
       `${msg.missing.length > 6 ? " …" : ""}). 해당 성부는 소리가 나지 않습니다.`;
-  } else if (!els.stage.dataset.bankName) {
+  } else if (NEEDS_BANK[msg.kind] && !els.stage.dataset.bankName) {
+    // Only for a format that names its instruments without carrying them. A
+    // .sop arrives with no bank because it needs none, and warning about that
+    // would be telling the listener to go and find a file that does not exist.
     els.warn.hidden = false;
     els.warn.textContent = "음색 뱅크(.bnk)가 없어 소리가 나지 않을 수 있습니다.";
   } else {
@@ -428,7 +464,7 @@ els.stop.addEventListener("click", () => {
 els.loop.addEventListener("change", () =>
   node?.port.postMessage({ type: "loop", value: els.loop.checked }));
 els.gain.addEventListener("input", () =>
-  node?.port.postMessage({ type: "gain", value: Number(els.gain.value) / 100 }));
+  node?.port.postMessage({ type: "volume", value: Number(els.gain.value) / 100 }));
 
 for (const type of ["wheel", "touchmove", "pointerdown"]) {
   els.view.addEventListener(type, () => setFollowing(false), { passive: true });
@@ -469,12 +505,20 @@ window.addEventListener("drop", (e) => e.preventDefault());
 // ── "remix this in Microtone" ─────────────────────────────────────────────
 //
 // Microtone (microtone.cc) is a tracker that runs in the browser and imports
-// .ims files. Sending the listener off with a download would mean saving a
-// file, finding it, and dropping it back in -- and for this format, doing that
-// TWICE, because a song without its instrument bank makes no sound. So the song
-// travels in the link: gzipped, base64url, in the URL FRAGMENT, which no server
-// ever sees and no cross-origin policy can get in the way of. Across the whole
-// reference corpus that is a median 9.5 kB of URL and a worst case of 52 kB.
+// every format this page plays. Sending the listener off with a download would
+// mean saving a file, finding it, and dropping it back in -- and for an .ims or
+// a .rol, doing that TWICE, because a song without its instrument bank makes no
+// sound. So the song travels in the link: gzipped, base64url, in the URL
+// FRAGMENT, which no server ever sees and no cross-origin policy can get in the
+// way of. Across the whole reference corpus that is a median 9.5 kB of URL and
+// a worst case of 52 kB.
+//
+// A .sop travels alone: it carries its own instruments (SOP §3), so there is no
+// second file to pair up. Its songs are much bigger on disk -- up to 512 kB
+// against an .ims's tens of kB -- but they are an event stream of mostly
+// repeated bytes and gzip eats them, so the URL is a median 6.1 kB and a worst
+// case of 33 kB across the 336 reference files: SMALLER than the .ims case,
+// where the bank travels too. Nothing here comes near the ceiling below.
 //
 // The receiving half is Microtone's src/ui/handoff.js; the envelope below is
 // the same twelve lines written the other way round.
@@ -514,9 +558,22 @@ async function maybeGzip(bytes) {
   }
 }
 
+/**
+ * The name the song travels under.
+ *
+ * Microtone chooses its converter from the EXTENSION, and this corpus is full
+ * of files whose names lie -- `classify` sorted the drop by what the bytes say,
+ * so the detected kind is what the other end has to be told, not whatever the
+ * file happened to be called.
+ */
+function handoffName(song) {
+  const stem = (song.name || "song").replace(/\.[^.]*$/, "");
+  return song.kind ? `${stem}.${song.kind}` : stem;
+}
+
 async function handoffUrl(song) {
   const parts = [];
-  handoffField(parts, song.name, song.song);
+  handoffField(parts, handoffName(song), song.song);
   handoffField(parts, song.bank ? (song.bankName || "bank.bnk") : "", song.bank ?? null);
   const inner = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
   let o = 0;
