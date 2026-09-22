@@ -363,11 +363,16 @@ function setupLyrics(iss, tickBeat) {
   const PLACEHOLDER_CREDITS = new Set([
     "WRITER", "COMPOSER", "SINGER", "EDITOR",
     "LeeYS", "MunBK", "KimTH", "Solgher", "Damul", "Salmosa",
+    // An older tool's default: one phrase, "This is song text for IMP",
+    // spread over the four fields.
+    "This", "is song", "text", "for IMP",
   ]);
+  // A few old files keep a picture's file name in the writer field.
+  const isPlaceholder = (v) => PLACEHOLDER_CREDITS.has(v) || /\.PCX$/i.test(v);
   const credits = [
     ["작사", iss.writer], ["작곡", iss.composer],
     ["노래", iss.singer], ["제작", iss.editor],
-  ].filter(([, v]) => v && v.trim() && !PLACEHOLDER_CREDITS.has(v.trim()));
+  ].filter(([, v]) => v && v.trim() && !isPlaceholder(v.trim()));
   els.credits.replaceChildren(...credits.map(([k, v]) => {
     const span = document.createElement("span");
     span.append(`${k} `);
@@ -422,16 +427,16 @@ function updateLyrics(tick) {
   // read as "now" without needing any other marker.
   for (const offset of [-2, -1, 1, 2]) nodes[span.line + offset]?.classList.add("near");
 
-  // The span already accounts for everything coloured so far on this line;
-  // convert its cell columns to character indices, then mark the cells
+  // The span already accounts for everything lit so far on this line, as
+  // runs of cells with gaps where no record painted (FILE_FORMATS §4.2);
+  // convert each run's cell columns to character indices, then mark the cells
   // (built by `buildLineCells`, each tagged with its own start index) that
-  // fall in that range.
+  // fall in any of them.
   const text = iss.lines[span.line] ?? "";
-  const from = cellToIndex(text, span.from);
-  const to = cellToIndex(text, span.to);
+  const runs = span.runs.map(([a, b]) => [cellToIndex(text, a), cellToIndex(text, b)]);
   for (const cell of line.cells) {
     const start = Number(cell.dataset.start);
-    cell.classList.toggle("mark", start >= from && start < to);
+    cell.classList.toggle("mark", runs.some(([from, to]) => start >= from && start < to));
   }
   if (following) centreLine(line);
 }
