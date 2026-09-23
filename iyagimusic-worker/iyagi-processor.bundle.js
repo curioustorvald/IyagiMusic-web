@@ -930,6 +930,20 @@ class OplChip {
       ch.car = this.operators[OP_BY_OFFSET[CHANNEL_OP_OFFSET[local] + 3] + base];
     }
     this.registers = new Uint8Array(this.opl3 ? 512 : 256);
+    /**
+     * How much of the modulator's own output feeds back into it, as a
+     * fraction of what the silicon does. 1 is the chip; anything else is a
+     * deliberate departure from it, and nothing in the library sets one.
+     *
+     * It exists for a listener who finds the chip's top feedback settings
+     * harsh. Feedback 6 and 7 push the modulator into the noisy, aliasing
+     * regime that is half of what an OPL sounds like and all of what people
+     * complain about; backing it off by an eighth keeps every patch its own
+     * shape and takes the edge off the worst of them. It is a property rather
+     * than a constructor option because a player wants to flip it mid-song.
+     * @type {number}
+     */
+    this.feedbackScale = 1;
     /** @type {Int32Array} channel index → meter row, or -1 while it is not a voice. */
     this.rowOfChannel = new Int32Array(this.channelCount);
     this.reset();
@@ -1341,7 +1355,7 @@ class OplChip {
    */
   #feedbackOf(ch) {
     if (!ch.feedback) return 0;
-    return ((ch.mod.out + ch.mod.prev) / 2 / (1 << (8 - ch.feedback))) | 0;
+    return ((ch.mod.out + ch.mod.prev) / 2 / (1 << (8 - ch.feedback)) * this.feedbackScale) | 0;
   }
 
   /**
@@ -2589,6 +2603,26 @@ const MAX_VOLUME = 127;
  * because nine-voice callers are the common case and 6…10 is what they mean.
  */
 const BD = 6, SD = 7, TOM = 8, TC = 9, HH = 10;
+
+/**
+ * §11.1: IMPLAY's fixed pan per channel, 0x40 centre, lower is further left.
+ * Set when a song loads and never moved by it; the song has no say.
+ */
+const IMPLAY_PAN = Object.freeze([
+  0x45, 0x38, 0x1f, 0x12, 0x53, 0x6a, 0x5c, 0x3d, 0x51, 0x17, 0x72,
+]);
+
+/**
+ * §11.1: split a channel volume into IMPLAY's two sides by its pan.
+ * @param {number} volume 0..127 @param {number} pan 0..127, 0x40 centre
+ * @returns {[number, number]} `[right, left]` -- bank 0's level, then bank 1's
+ */
+function implaySplit(volume, pan) {
+  let right = volume, left = volume;
+  if (pan < 0x40) right -= ((0x40 - pan) * volume) >> 6;
+  if (pan > 0x40) left -= ((pan - 0x40) * volume) >> 6;
+  return [right, left];
+}
 const RHYTHM_MASK = [0x10, 0x08, 0x04, 0x02, 0x01];   // BD, SD, TOM, TC, HH
 
 /** §6: the tom starts two octaves below chip middle C, the snare 7 above it. */
@@ -2760,6 +2794,11 @@ class AdlibDriver {
    *   `.sop` (SOP §8.1): bends are SOP pitch values 0..200 on Note's own
    *   F-number table, a joined channel pair stays joined when it is given a
    *   two-operator patch, and a corrupt pan value corrupts 0xC0. Default false.
+   * @param {boolean} [options.mirror] play the nine-channel layout the way
+   *   IMPLAY does on a YMF262 (§11.1): every melodic channel twice, once per
+   *   register bank, bank 0 on the right and bank 1 on the left, with the
+   *   levels split by `IMPLAY_PAN`. The chip must be an OPL3; `opl3` must be
+   *   false, because the voices are still the YM3812's nine. Default false.
    */
   constructor(chip, options = {}) {
     this.chip = chip;
@@ -2767,6 +2806,16 @@ class AdlibDriver {
     this.opl3 = !!options.opl3;
     /** @type {boolean} */
     this.sop = !!options.sop;
+    /** @type {boolean} */
+    this.mirror = !!options.mirror && !this.opl3;
+    /**
+     * Mirror mode: whether the two banks get IMPLAY's panned levels (true) or
+     * the same level each (false). The second is mono, sample for sample what
+     * a YM3812 plays, and is what lets a listener switch between the two
+     * mid-song without reloading anything. See `setMirrorPanning`.
+     * @type {boolean}
+     */
+    this.mirrorPanning = true;
     const layout = chipLayout(this.opl3);
     this.banks = layout.banks;
     this.channelCount = layout.channelCount;
@@ -2792,8 +2841,8 @@ class AdlibDriver {
   reset() {
     // NEW first: until it is set, a YMF262 ignores its second bank, so zeroing
     // the bank before setting it would zero nothing.
-    if (this.opl3) this.chip.write(REG_OPL3_ENABLE, OPL3_NEW);
-    for (let b = 0; b < this.banks; b++) {
+    if (this.opl3 || this.mirror) this.chip.write(REG_OPL3_ENABLE, OPL3_NEW);
+    for (let b = 0; b < (this.mirror ? 2 : this.banks); b++) {
       const base = b * BANK_STRIDE;
       for (let r = 1; r <= 0xf5; r++) {
         const reg = base + r;
@@ -2853,7 +2902,7 @@ class AdlibDriver {
      * @type {Int32Array}
      */
     this.channelC0Or = new Int32Array(this.channelCount);
-    if (this.opl3) for (let c = 0; c < this.channelCount; c++) this.#writeC0(c);
+    if (this.opl3 || this.mirror) for (let c = 0; c < this.channelCount; c++) this.#writeC0(c);
 
     this.setMode(false);
     this.setGlobalParams(0, 0, 0);
@@ -2886,12 +2935,27 @@ class AdlibDriver {
       this.chip.write(REG_FOUROP, 0);
     }
     this.#sendAmVibRhythm();
+    // §11.1: in mirror mode channels 6..8 are routed by what they are. As
+    // drums they play on bank 0 alone, to both sides; as melodic channels,
+    // bank 0 is the right.
+    if (this.mirror) for (let c = 6; c < CHANNEL_COUNT; c++) this.#writeC0(c);
+  }
+
+  /**
+   * Mirror mode: IMPLAY's panned levels, or the same level on both banks.
+   * Takes effect at once, on every voice. Ignored outside mirror mode.
+   * @param {boolean} on
+   */
+  setMirrorPanning(on) {
+    if (!this.mirror || this.mirrorPanning === !!on) return;
+    this.mirrorPanning = !!on;
+    for (let s = 0; s < this.slotCount; s++) this.#sendKslLevel(s);
   }
 
   /** @param {boolean} on */
   setWaveSelect(on) {
     this.waveSelect = !!on;
-    for (let s = 0; s < this.slotCount; s++) this.chip.write(0xe0 + this.slotRegister[s], 0);
+    for (let s = 0; s < this.slotCount; s++) this.#writeSlot(0xe0, s, 0);
     this.chip.write(0x01, on ? 0x20 : 0);
   }
 
@@ -3139,12 +3203,39 @@ class AdlibDriver {
   #sendKslLevel(slot) {
     const p = this.slotParams[slot];
     const voice = this.#voiceOfSlot(slot);
-    let amplitude = 63 - (p[P_LEVEL] & 63);
-    if (this.#isOutputSlot(slot, voice)) {
-      amplitude = (amplitude * this.voiceVolume[voice] + (MAX_VOLUME + 1) / 2) >> 7;
+    const level = 63 - (p[P_LEVEL] & 63);
+    const ksl = (p[P_KSL] & 3) << 6;
+    const scale = (volume) => (level * volume + (MAX_VOLUME + 1) / 2) >> 7;
+    if (!this.#isOutputSlot(slot, voice)) {
+      this.#writeSlot(0x40, slot, (63 - level) | ksl);
+      return;
     }
-    const value = (63 - amplitude) | ((p[P_KSL] & 3) << 6);
-    this.chip.write(0x40 + this.slotRegister[slot], value);
+    const volume = this.voiceVolume[voice];
+    if (!this.#mirrored(slot)) {
+      this.chip.write(0x40 + this.slotRegister[slot], (63 - scale(volume)) | ksl);
+      return;
+    }
+    // §11.1: the same voice at two levels, one per bank; centred when the
+    // listener has asked for mono.
+    const [right, left] = this.mirrorPanning
+      ? implaySplit(volume, IMPLAY_PAN[voice] ?? 0x40) : [volume, volume];
+    this.chip.write(0x40 + this.slotRegister[slot], (63 - scale(right)) | ksl);
+    this.chip.write(0x140 + this.slotRegister[slot], (63 - scale(left)) | ksl);
+  }
+
+  /**
+   * Mirror mode: whether a slot is doubled onto the second bank -- which
+   * every melodic channel's slots are, and the drums' are not (§11.1).
+   */
+  #mirrored(slot) {
+    if (!this.mirror) return false;
+    return !(this.percussion && this.slotChannel[slot] >= 6);
+  }
+
+  /** An operator register, in bank 0 and, if it is mirrored, in bank 1 too. */
+  #writeSlot(base, slot, value) {
+    this.chip.write(base + this.slotRegister[slot], value);
+    if (this.#mirrored(slot)) this.chip.write(0x100 + base + this.slotRegister[slot], value);
   }
 
   /** Whether channel volume applies to this operator. §4, §10. */
@@ -3204,19 +3295,32 @@ class AdlibDriver {
 
   /** §11. One channel's 0xC0: feedback and connection, plus the stereo bits. */
   #writeC0(channel) {
+    const bits = this.channelC0[channel] | this.channelC0Or[channel];
+    if (this.mirror) {
+      // §11.1: IMPLAY writes 0xA0 to bank 0 and 0x50 to bank 1 -- outputs
+      // B+D and A+C, which on a Sound Blaster's wiring are right and left --
+      // and 0xF0, everything, to a drum channel. Only A and B exist here.
+      if (this.percussion && channel >= 6) {
+        this.chip.write(0xc0 + channel, bits | (PAN_CENTRE << PAN_SHIFT));
+        return;
+      }
+      this.chip.write(0xc0 + channel, bits | (PAN_RIGHT << PAN_SHIFT));
+      this.chip.write(0x1c0 + channel, bits | (PAN_LEFT << PAN_SHIFT));
+      return;
+    }
     const pan = this.opl3 ? (this.channelPan[channel] & 3) << PAN_SHIFT : 0;
-    this.#writeChannel(0xc0, channel, this.channelC0[channel] | this.channelC0Or[channel] | pan);
+    this.#writeChannel(0xc0, channel, bits | pan);
   }
 
   #sendAttackDecay(slot) {
     const p = this.slotParams[slot];
-    this.chip.write(0x60 + this.slotRegister[slot],
+    this.#writeSlot(0x60, slot,
       ((p[P_ATTACK] & 0x0f) << 4) | (p[P_DECAY] & 0x0f));
   }
 
   #sendSustainRelease(slot) {
     const p = this.slotParams[slot];
-    this.chip.write(0x80 + this.slotRegister[slot],
+    this.#writeSlot(0x80, slot,
       ((p[P_SUSTAIN] & 0x0f) << 4) | (p[P_RELEASE] & 0x0f));
   }
 
@@ -3224,7 +3328,7 @@ class AdlibDriver {
     const p = this.slotParams[slot];
     const value = (p[P_AM] ? 0x80 : 0) | (p[P_VIB] ? 0x40 : 0) |
       (p[P_EG] ? 0x20 : 0) | (p[P_KSR] ? 0x10 : 0) | (p[P_MULTIPLE] & 0x0f);
-    this.chip.write(0x20 + this.slotRegister[slot], value);
+    this.#writeSlot(0x20, slot, value);
   }
 
   /**
@@ -3236,7 +3340,7 @@ class AdlibDriver {
   #sendWaveSelect(slot) {
     const mask = this.opl3 ? 7 : 3;
     const wave = this.waveSelect ? this.slotParams[slot][13] & mask : 0;
-    this.chip.write(0xe0 + this.slotRegister[slot], wave);
+    this.#writeSlot(0xe0, slot, wave);
   }
 
   #sendAmVibRhythm() {
@@ -3245,10 +3349,16 @@ class AdlibDriver {
     this.chip.write(0xbd, value);
   }
 
-  /** A per-channel register, in whichever bank the channel lives. */
+  /**
+   * A per-channel register, in whichever bank the channel lives -- and, for a
+   * melodic channel in mirror mode, in the second bank as well (§11.1).
+   */
   #writeChannel(base, channel, value) {
     const bank = channel >= CHANNEL_COUNT ? BANK_STRIDE : 0;
     this.chip.write(base + (channel % CHANNEL_COUNT) + bank, value);
+    if (this.mirror && !(this.percussion && channel >= 6)) {
+      this.chip.write(base + channel + BANK_STRIDE, value);
+    }
   }
 
   /** §5.2. */
@@ -3354,6 +3464,15 @@ const NOTE_ON = 0, NOTE_OFF = 1, VOLUME = 2, PATCH = 3, BEND = 4,
  * @property {number} [order] tie-break within a tick, for ROL's parallel tracks
  */
 
+/**
+ * A song's length and where its ticks fall in time, at its own tempo.
+ * @typedef {object} Timeline
+ * @property {number} endTick where the song ends
+ * @property {number} duration seconds from the start to `endTick`
+ * @property {(tick:number)=>number} secondsAt
+ * @property {(seconds:number)=>number} tickAt
+ */
+
 class Sequencer {
   /**
    * @param {object} opts
@@ -3367,6 +3486,8 @@ class Sequencer {
    * @param {number} [opts.sampleRate]      defaults to the chip's native rate
    * @param {boolean} [opts.opl3]           drive the chip as a YMF262;
    *   defaults to whatever the chip says it is
+   * @param {boolean} [opts.mirror]         drive an OPL3 as IMPLAY does for
+   *   stereo (ENGINE_SPEC §11.1): the nine-voice layout, doubled
    * @param {boolean} [opts.sop]            play `sopSequence` events the way
    *   NOTE.EXE does (SOP §8.1); the driver takes SOP pitches and joins pairs
    *   as the events say
@@ -3374,7 +3495,8 @@ class Sequencer {
   constructor(opts) {
     this.chip = opts.chip;
     this.driver = new AdlibDriver(opts.chip, {
-      opl3: opts.opl3 ?? !!opts.chip.opl3, sop: !!opts.sop,
+      opl3: opts.mirror ? false : (opts.opl3 ?? !!opts.chip.opl3),
+      sop: !!opts.sop, mirror: !!opts.mirror,
     });
     this.makeEvents = opts.events;
     this.tickBeat = opts.tickBeat || 240;
@@ -3384,7 +3506,36 @@ class Sequencer {
     this.patches = opts.patches ?? [];
     this.sampleRate = opts.sampleRate ?? NATIVE_RATE;
     this.loop = false;
+    /**
+     * Playback speed as a multiple of the song's own tempo. IMPLAY's `<` and
+     * `>` (ENGINE_SPEC §13). It survives `reset`, as a listener's setting
+     * should, and it is not the song's tempo: `tempo` stays what the file says.
+     * @type {number}
+     */
+    this.speed = 1;
+    /**
+     * Semitones added to every note a melodic voice starts -- IMPLAY's key
+     * shift (ENGINE_SPEC §13), except that the drums are left alone. Like
+     * IMPLAY's, it reaches the next note struck rather than the ones already
+     * sounding. Survives `reset`.
+     * @type {number}
+     */
+    this.transpose = 0;
+    /** @type {Timeline|null} built on first use; see `timeline` */
+    this.timelineCache = null;
     this.reset();
+  }
+
+  /**
+   * Change the speed without a jump: what is left of the gap to the next
+   * event is rescaled, so the change is heard from the next sample rather
+   * than from the next event.
+   * @param {number} speed a multiple of the song's tempo; must be positive
+   */
+  setSpeed(speed) {
+    if (!(speed > 0)) throw new RangeError(`speed must be positive, not ${speed}`);
+    if (this.sampleCursor > 0) this.sampleCursor *= this.speed / speed;
+    this.speed = speed;
   }
 
   reset() {
@@ -3399,6 +3550,12 @@ class Sequencer {
     this.tick = 0;
     this.sampleCursor = 0;      // fractional samples owed before the next event
     this.samplesRendered = 0;
+    /**
+     * Samples of *song* time so far: what `samplesRendered` would be at speed
+     * 1. It is what a clock or a progress bar wants, because it lines up with
+     * `timeline()` whatever the speed has been.
+     */
+    this.songSamples = 0;
     /** @type {boolean} */
     this.ended = false;
     // What each voice is currently set to, for anything showing the player
@@ -3410,9 +3567,74 @@ class Sequencer {
     this.patchEpoch = (this.patchEpoch | 0) + 1;   // never repeats, so a reset shows
   }
 
-  /** Seconds per tick at the current tempo. */
+  /** Seconds per tick at the current tempo and speed. */
   get tickSeconds() {
-    return 60 / (this.tempo * this.tickBeat);
+    return 60 / (this.tempo * this.tickBeat * this.speed);
+  }
+
+  /**
+   * The song's length and its tick-to-time map, at its own tempo. Built by
+   * reading the events through once, which for any song in the corpus is a
+   * few milliseconds, and kept.
+   *
+   * The end is the END event's tick -- or, for an `.ims` with no FC, where
+   * the sequence's closing END sits at the end of time, the last real event's.
+   *
+   * @returns {Timeline}
+   */
+  timeline() {
+    if (this.timelineCache) return this.timelineCache;
+    const steps = [{ tick: 0, seconds: 0, tempo: this.baseTempo }];
+    let last = 0, end = -1;
+    for (const ev of this.makeEvents) {
+      if (ev.type === END) { end = ev.tick >= Number.MAX_SAFE_INTEGER ? last : ev.tick; break; }
+      last = ev.tick;
+      if (ev.type !== TEMPO) continue;
+      const prev = steps[steps.length - 1];
+      const seconds = prev.seconds + (ev.tick - prev.tick) * 60 / (prev.tempo * this.tickBeat);
+      steps.push({ tick: ev.tick, seconds, tempo: ev.tempo });
+    }
+    if (end < 0) end = last;
+    const secondsAt = (tick) => {
+      let i = steps.length - 1;
+      while (i > 0 && steps[i].tick > tick) i--;
+      const s = steps[i];
+      return s.seconds + (tick - s.tick) * 60 / (s.tempo * this.tickBeat);
+    };
+    const tickAt = (seconds) => {
+      let i = steps.length - 1;
+      while (i > 0 && steps[i].seconds > seconds) i--;
+      const s = steps[i];
+      return Math.max(0, Math.round(s.tick + (seconds - s.seconds) * s.tempo * this.tickBeat / 60));
+    };
+    this.timelineCache = { endTick: end, duration: secondsAt(end), secondsAt, tickAt };
+    return this.timelineCache;
+  }
+
+  /**
+   * Jump to `tick`, as IMPLAY does (ENGINE_SPEC §13): start the song over,
+   * run every event before `tick` without making a sound, and carry on from
+   * there. Whatever those events leave behind -- patches, volumes, bends,
+   * tempo -- is exactly what a listener who had played that far would have,
+   * and a note still held at `tick` was keyed during the run and so starts
+   * again from its attack. IMPLAY meant to do that too and does not: its
+   * seek leaves every voice silent until the next note (ENGINE_SPEC §13).
+   *
+   * The caller resets the chip first; the driver's reset only rewrites it.
+   *
+   * @param {number} tick
+   */
+  seek(tick) {
+    const target = Math.max(0, Math.floor(tick));
+    this.reset();
+    while (!this.pending.done && this.pending.value.tick < target) {
+      this.#apply(this.pending.value);
+      this.pending = this.iterator.next();
+      if (this.ended) return;
+    }
+    this.tick = target;
+    this.samplesRendered = this.songSamples =
+      Math.round(this.timeline().secondsAt(target) * this.sampleRate);
   }
 
   /** How far through the song we are, in seconds. */
@@ -3427,7 +3649,9 @@ class Sequencer {
         // A slur keeps the key down, so the note changes pitch unstruck.
         if (!ev.legato) d.noteOff(ev.voice);
         if (ev.volume !== undefined) d.setVoiceVolume(ev.voice, ev.volume);
-        d.noteOn(ev.voice, ev.note);
+        // The key shift is for singing along to, and a drum has no key: IMPLAY
+        // moves its drums too, which only detunes the kit.
+        d.noteOn(ev.voice, ev.voice < d.melodicVoices ? ev.note + this.transpose : ev.note);
         break;
       case NOTE_OFF:
         d.noteOff(ev.voice);
@@ -3484,6 +3708,7 @@ class Sequencer {
     this.iterator = this.makeEvents[Symbol.iterator]();
     this.pending = this.iterator.next();
     this.tick = 0;
+    this.songSamples = 0;
     this.ended = false;
     this.tempo = this.baseTempo;
     for (let v = 0; v < this.driver.voiceCount; v++) this.driver.noteOff(v);
@@ -3533,6 +3758,7 @@ class Sequencer {
       else this.chip.generate(out, offset + written, run);
       this.sampleCursor -= run;
       this.samplesRendered += run;
+      this.songSamples += run * this.speed;
       written += run;
     }
     if (written < count) {
@@ -3950,6 +4176,29 @@ function sopSequence(song, layout) {
 /** Output scale by chip, before the caller overrides it. See `headroom` below. */
 const DEFAULT_GAIN = { opl2: 0.55, opl3: 0.32 };
 
+
+/**
+ * The "standard" tone: what a sound card designed today would do with the
+ * same chip. Feedback backed off by an eighth, and one pole of low-pass at
+ * 12 kHz on the chip's own output, which takes off the aliasing a 49.7 kHz
+ * DAC with no reconstruction filter to speak of leaves at the top. "raw" is
+ * the chip verbatim, and the library's default.
+ */
+const STANDARD_FEEDBACK = 0.875;
+const STANDARD_CUTOFF_HZ = 12000;
+/**
+ * The low-pass is one pole by the bilinear transform, prewarped: −3 dB at the
+ * cutoff exactly, and a zero at the chip's Nyquist. The simpler y += a·(x − y)
+ * places its pole by the impulse response instead, and with a cutoff this
+ * close to Nyquist that leaves it −2.3 dB at 12 kHz and never more than −4 dB
+ * anywhere -- a filter in name only.
+ *
+ *   y[n] = B·(x[n] + x[n−1]) + A·y[n−1]
+ */
+const STANDARD_WARP = Math.tan(Math.PI * STANDARD_CUTOFF_HZ / NATIVE_RATE);
+const STANDARD_B = STANDARD_WARP / (1 + STANDARD_WARP);
+const STANDARD_A = (1 - STANDARD_WARP) / (1 + STANDARD_WARP);
+
 /**
  * The lyric text that should be lit at a given tick, and how much of it.
  * `from` and `to` are character cells into `text`, not string indices.
@@ -3979,6 +4228,13 @@ class IyagiMusic {
    *   the YMF262 it was written for and everything else the YM3812 it was
    *   written for. "opl2" forces the nine-voice reduction a `.sop` used to get
    *   (SOP §8), which is worth having for comparison and for nothing else.
+   * @param {boolean} [opts.implayStereo]
+   *   play an `.ims` or `.rol` in IMPLAY's stereo (ENGINE_SPEC §11.1): on a
+   *   YMF262, every melodic voice on both register banks with a fixed pan per
+   *   channel. `mono` then switches between that and a mono mix identical to
+   *   the YM3812's without reloading. Ignored for a `.sop`, and when `chip`
+   *   is given as anything but "auto".
+   * @param {"raw"|"standard"} [opts.tone]   see `tone`; default "raw"
    * @param {number} [opts.gain]             output scale; default by chip, see below
    * @param {(code:number)=>string|null} [opts.userGlyph]
    *   overrides the built-in mapping for Iyagi's own font glyphs
@@ -4003,9 +4259,17 @@ class IyagiMusic {
     if (want !== "auto" && want !== "opl2" && want !== "opl3") {
       throw new Error(`unknown chip ${JSON.stringify(want)}: use "auto", "opl2" or "opl3"`);
     }
+    /**
+     * §11.1: IMPLAY's stereo. The chip is a YMF262, but the voices are still
+     * the YM3812's nine, each played twice.
+     * @type {boolean}
+     */
+    this.mirror = !!opts.implayStereo && want === "auto" && kind !== "sop";
     /** @type {"opl2"|"opl3"} */
-    this.chipKind = want === "auto" ? (kind === "sop" ? "opl3" : "opl2") : want;
+    this.chipKind = this.mirror ? "opl3"
+      : want === "auto" ? (kind === "sop" ? "opl3" : "opl2") : want;
     this.chip = this.chipKind === "opl3" ? new OPL3() : new OPL2();
+    const mirror = this.mirror;
 
     if (kind === "ims") {
       this.song = parseIms(opts.song, this.textOptions);
@@ -4019,7 +4283,10 @@ class IyagiMusic {
         percussive: this.song.percussive,
         pitchRange: this.song.pitchRange,
         patches: this.patches,
+        mirror,
       });
+      /** How many instruments the song names -- IMPLAY's "사용 악기". */
+      this.instrumentCount = this.song.patchNames.length;
     } else if (kind === "sop") {
       // A SOP carries its own instruments, so there is no bank to resolve and
       // nothing that can go missing. How its twenty tracks are laid over the
@@ -4038,6 +4305,7 @@ class IyagiMusic {
         sop: true,                            // SOP §8.1: play it as NOTE.EXE does
         patches: [],
       });
+      this.instrumentCount = this.song.instruments.filter(Boolean).length;
     } else {
       this.song = parseRol(opts.song, this.textOptions);
       const resolve = (name) => {
@@ -4056,7 +4324,9 @@ class IyagiMusic {
         percussive: this.song.percussive,
         pitchRange: 1,
         patches: [],
+        mirror,
       });
+      this.instrumentCount = names.size;
     }
 
     /**
@@ -4089,7 +4359,9 @@ class IyagiMusic {
      *
      * @type {number}
      */
-    this.headroom = opts.gain ?? DEFAULT_GAIN[this.chipKind];
+    // IMPLAY's stereo puts each voice on each side at no more than its mono
+    // level, so each bus is an OPL2's worth of voices and wants an OPL2's gain.
+    this.headroom = opts.gain ?? DEFAULT_GAIN[this.mirror ? "opl2" : this.chipKind];
     /** @type {number} the scale actually applied; `volume` moves it. */
     this.gain = this.headroom;
     this.ratio = NATIVE_RATE / this.sampleRate;
@@ -4102,6 +4374,85 @@ class IyagiMusic {
     this.prevL = 0;
     this.prevR = 0;
     this.frac = 0;
+    /** @type {"raw"|"standard"} */
+    this.toneMode = "raw";
+    /** Low-pass state: last input and last output, per side. */
+    this.filter = new Float64Array(4);
+    this.tone = opts.tone ?? "raw";
+    /** @type {boolean} */
+    this.monoMix = false;
+    /** Scratch rows for folding a mirrored chip's meters; see `readMeters`. */
+    this.meterScratch = this.mirror ? new Float32Array(METER_VOICES * METER_STRIDE) : null;
+  }
+
+  // ── what a listener can change while it plays ───────────────────────────
+
+  /**
+   * "raw" is the chip as it is. "standard" backs its feedback off by an
+   * eighth and puts one pole of low-pass at 12 kHz after it: see
+   * STANDARD_FEEDBACK. Either can be switched mid-song.
+   * @type {"raw"|"standard"}
+   */
+  get tone() { return this.toneMode; }
+  set tone(v) {
+    if (v !== "raw" && v !== "standard") {
+      throw new Error(`unknown tone ${JSON.stringify(v)}: use "raw" or "standard"`);
+    }
+    this.toneMode = v;
+    this.chip.feedbackScale = v === "standard" ? STANDARD_FEEDBACK : 1;
+  }
+
+  /**
+   * Mono output. On a song in IMPLAY's stereo it centres every voice, which
+   * is sample for sample what a YM3812 plays; on a `.sop` it folds the two
+   * sides together. Takes effect at once. Nothing to do on a mono chip.
+   * @type {boolean}
+   */
+  get mono() { return this.monoMix; }
+  set mono(v) {
+    this.monoMix = !!v;
+    this.sequencer.driver.setMirrorPanning(!this.monoMix);
+  }
+
+  /** Whether `mono` would change anything: the song can come out in stereo. */
+  get canStereo() { return this.stereo; }
+
+  /**
+   * Playback speed as a multiple of the song's tempo, 1 by default. IMPLAY
+   * steps it in twentieths from 0 to 4 (ENGINE_SPEC §13); this takes any
+   * positive number and leaves the stepping to the caller.
+   * @type {number}
+   */
+  get speed() { return this.sequencer.speed; }
+  set speed(v) { this.sequencer.setSpeed(v); }
+
+  /**
+   * Key shift in semitones for the melodic voices, 0 by default. It reaches
+   * each voice at its next note, as IMPLAY's does. IMPLAY allows ±24.
+   * @type {number}
+   */
+  get transpose() { return this.sequencer.transpose; }
+  set transpose(v) { this.sequencer.transpose = Math.trunc(v) || 0; }
+
+  /** The song's tempo right now, in bpm, before `speed`. */
+  get tempo() { return this.sequencer.tempo; }
+
+  /** Length of the song in seconds, at its own tempo. */
+  get duration() { return this.sequencer.timeline().duration; }
+
+  /** Where the song is, in seconds of song time: `duration` at the end. */
+  get position() { return this.sequencer.songSamples / NATIVE_RATE; }
+
+  /**
+   * Jump to a point in the song, in seconds of song time. See
+   * `Sequencer.seek` for what that does and why it sounds as it does.
+   * @param {number} seconds
+   */
+  seek(seconds) {
+    const timeline = this.sequencer.timeline();
+    const tick = timeline.tickAt(Math.min(Math.max(0, seconds), timeline.duration));
+    this.reset();
+    this.sequencer.seek(tick);
   }
 
   /** Song title, already decoded from Johab. */
@@ -4158,11 +4509,37 @@ class IyagiMusic {
    * @returns {Float32Array} the same buffer
    */
   readMeters(out) {
-    this.chip.readMeters(out);
+    if (this.mirror) this.#foldMeters(out);
+    else this.chip.readMeters(out);
     const volume = this.sequencer.driver.voiceVolume;
     // Only the rows this chip has: past them the driver has no voice to read a
     // volume off, and writing `undefined` into a Float32Array writes NaN.
     for (let v = 0; v < this.chip.voiceRows; v++) out[v * METER_STRIDE + M_VOLUME] = volume[v];
+    return out;
+  }
+
+  /**
+   * IMPLAY's stereo shows up on the chip as eighteen channels -- every voice
+   * twice -- and a display wants the nine the song has. Each voice's row is
+   * its bank-0 channel's, with the louder of its two copies as the peak:
+   * that is the side a listener hears it on. The drums are the chip's own
+   * last five rows, as always.
+   */
+  #foldMeters(out) {
+    const rows = this.chip.readMeters(this.meterScratch);
+    out.fill(0);
+    const melodic = this.sequencer.driver.melodicVoices;
+    // The chip's rows: bank 0's melodic channels, then all nine of bank 1's.
+    for (let v = 0; v < melodic; v++) {
+      const o = v * METER_STRIDE;
+      const twin = (melodic + v) * METER_STRIDE;
+      out.set(rows.subarray(o, o + METER_STRIDE), o);
+      out[o + M_PEAK] = Math.max(rows[o + M_PEAK], rows[twin + M_PEAK]);
+    }
+    if (this.sequencer.driver.percussion) {
+      const from = (melodic + CHANNEL_COUNT) * METER_STRIDE;
+      out.set(rows.subarray(from, from + RHYTHM_VOICES * METER_STRIDE), melodic * METER_STRIDE);
+    }
     return out;
   }
 
@@ -4172,6 +4549,7 @@ class IyagiMusic {
     this.nativeLen = this.nativePos = 0;
     this.frac = 0;
     this.prevL = this.prevR = 0;
+    this.filter.fill(0);
   }
 
   /** Take the next chip sample into `prevL`/`prevR`, refilling if need be. */
@@ -4183,10 +4561,28 @@ class IyagiMusic {
         : this.sequencer.render(this.nativeL, 0, this.nativeL.length);
       this.nativePos = 0;
       if (this.nativeLen === 0) { this.prevL = this.prevR = 0; return; }
+      if (this.toneMode === "standard") this.#smooth();
     }
     this.prevL = this.nativeL[this.nativePos];
     this.prevR = this.nativeR[this.nativePos];
     this.nativePos++;
+  }
+
+  /** The standard tone's low-pass, over the block just rendered, in place. */
+  #smooth() {
+    const f = this.filter;
+    const run = (buf, at) => {
+      let x1 = f[at], y1 = f[at + 1];
+      for (let i = 0; i < this.nativeLen; i++) {
+        const x = buf[i];
+        y1 = STANDARD_B * (x + x1) + STANDARD_A * y1;
+        x1 = x;
+        buf[i] = y1;
+      }
+      f[at] = x1; f[at + 1] = y1;
+    };
+    run(this.nativeL, 0);
+    if (this.nativeR !== this.nativeL) run(this.nativeR, 2);
   }
 
   /**
@@ -4249,7 +4645,7 @@ class IyagiMusic {
       right.fill(0, offset, offset + count);
       return false;
     }
-    if (!this.stereo) {
+    if (!this.stereo || this.monoMix) {
       this.#resample(left, null, offset, count);
       right.set(left.subarray(offset, offset + count), offset);
       return true;
@@ -4343,12 +4739,19 @@ class IyagiProcessor extends AudioWorkletProcessor {
             lyrics: msg.lyrics,
             sampleRate,
             chip: msg.chip,
+            implayStereo: !!msg.implayStereo,
+            tone: msg.tone,
           });
           // The page's slider is a fraction of the chip's headroom, not an
           // absolute scale -- an OPL3 song has twenty voices to fit into the
           // same output as an OPL2 song's nine.
           if (msg.volume !== undefined) this.music.volume = msg.volume;
           this.music.loop = !!msg.loop;
+          // A listener's settings outlive the song: the page sends them with
+          // every load rather than reapplying them after it.
+          if (msg.mono !== undefined) this.music.mono = !!msg.mono;
+          if (msg.speed !== undefined) this.music.speed = msg.speed;
+          if (msg.transpose !== undefined) this.music.transpose = msg.transpose;
           this.playing = false;
           this.patchEpoch = -1;
           this.port.postMessage({
@@ -4359,6 +4762,12 @@ class IyagiProcessor extends AudioWorkletProcessor {
             lyrics: this.music.lyrics,
             tickBeat: this.music.song.tickBeat,
             chip: this.music.chipKind,
+            implayStereo: this.music.mirror,
+            canStereo: this.music.canStereo,
+            duration: this.music.duration,
+            tempo: this.music.tempo,
+            instrumentCount: this.music.instrumentCount,
+            percussive: !!this.music.song.percussive,
           });
           // One frame of chip status right away, so a display can lay itself
           // out for the right number of voices before anything is played.
@@ -4378,6 +4787,13 @@ class IyagiProcessor extends AudioWorkletProcessor {
         break;
       case "loop": if (this.music) this.music.loop = !!msg.value; break;
       case "volume": if (this.music) this.music.volume = msg.value; break;
+      case "mono": if (this.music) this.music.mono = !!msg.value; break;
+      case "tone": if (this.music) this.music.tone = msg.value; break;
+      case "speed": if (this.music) this.music.speed = msg.value; break;
+      case "transpose": if (this.music) this.music.transpose = msg.value; break;
+      case "seek":
+        if (this.music) { this.music.seek(msg.seconds); this.#report(true); }
+        break;
       default: break;
     }
   }
@@ -4389,6 +4805,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
     const msg = {
       type: "position",
       seconds: this.music.seconds,
+      position: this.music.position,
+      tempo: this.music.tempo,
       tick: this.music.tick,
       ended: this.music.ended,
       meter: this.music.readMeters(this.meter),

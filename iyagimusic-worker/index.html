@@ -8,72 +8,115 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<header>
-  <h1>IyagiMusic<span>.js</span></h1>
-  <p class="tagline">이야기 뮤직 사운드 — 1990년대 PC통신 음악을 브라우저에서</p>
-</header>
 
-<main>
-  <section id="drop" class="drop" tabindex="0" aria-label="파일 열기">
-    <div class="drop-inner">
-      <p class="drop-title">파일을 여기에 끌어다 놓으세요</p>
-      <p class="drop-hint">
-        <code>.ims</code> <code>.rol</code> <code>.sop</code> 음악 파일 하나면
-        됩니다. 곡 전용 <code>.bnk</code> 음색 뱅크와 <code>.iss</code> 가사가
-        있으면 함께 놓으세요 (<code>.sop</code>은 음색을 자기가 들고 있어서
-        뱅크가 필요 없습니다).
-      </p>
-      <button type="button" id="pick">파일 고르기</button>
+<!-- Four units stacked like a hi-fi rack, in IMPLAY's order: the display, the
+     controls, the lyrics, and -- where IMPLAY had its mixer and microphone --
+     a status strip holding the few switches this player has instead. -->
+<main class="rack" id="rack">
+
+  <!-- ── 1. display ─────────────────────────────────────────────────── -->
+  <section class="unit unit-display" aria-label="표시부">
+    <div class="brand">
+      <h1>IyagiMusic<span>.js</span></h1>
+      <p>이야기 뮤직 플레이어</p>
+      <button type="button" id="open" class="open">열기</button>
       <input type="file" id="files" multiple accept=".ims,.rol,.sop,.bnk,.iss,.IMS,.ROL,.SOP,.BNK,.ISS" hidden>
     </div>
-  </section>
 
-  <section id="stage" class="stage" hidden>
-    <div class="song">
-      <h2 id="title">—</h2>
-      <dl id="meta" class="meta"></dl>
+    <div class="meter-well">
+      <canvas id="meter" class="meter" aria-hidden="true"></canvas>
+      <p id="chipline" class="chipline">—</p>
+    </div>
+
+    <div class="readout">
+      <div class="lcd lcd-title"><span id="title">파일을 이곳에 끌어다 놓으세요</span></div>
+      <div class="lcd-row">
+        <div class="lcd lcd-file"><span id="file">.ims · .rol · .sop</span><span id="index" class="lcd-dim"></span></div>
+        <div class="lcd lcd-badge" id="stereo-badge" title="출력">—</div>
+      </div>
+      <div class="lcd-row">
+        <div class="lcd lcd-bank" id="bank">.bnk · .iss도 함께</div>
+        <div class="lcd lcd-count" id="count">사용 악기 —</div>
+      </div>
       <p id="warn" class="warn" hidden></p>
     </div>
+  </section>
 
-    <div class="transport">
-      <button type="button" id="play" class="primary" disabled>재생</button>
-      <button type="button" id="stop" disabled>정지</button>
-      <label class="toggle"><input type="checkbox" id="loop"> 반복</label>
-      <label class="vol">음량 <input type="range" id="gain" min="0" max="100" value="100"></label>
-      <span id="clock" class="clock">0:00</span>
-    </div>
+  <!-- ── 2. controls ────────────────────────────────────────────────── -->
+  <section class="unit unit-control" aria-label="조작부">
+    <div class="channels lcd" id="channels" aria-label="성부"></div>
 
-    <section id="scope" class="scope" aria-label="음원 상태">
-      <div class="scope-head">
-        <h3>음원 상태</h3>
-        <div id="chipflags" class="chips"></div>
-        <button type="button" id="scope-toggle" class="ghost"
-                aria-expanded="true" aria-controls="scope-body">숨기기</button>
+    <div class="deck">
+      <div class="transport" role="group" aria-label="재생">
+        <button type="button" id="prev" class="key" title="처음으로 / 이전 곡 (Home)" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="2" height="10"/><path d="M14 3v10L5 8z"/></svg></button>
+        <button type="button" id="rew" class="key" title="되감기 (Z) — 누르고 있으면 계속" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10L1 8z"/><path d="M15 3v10L8 8z"/></svg></button>
+        <button type="button" id="ff" class="key" title="빨리 감기 (X) — 누르고 있으면 계속" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1 3v10l7-5z"/><path d="M8 3v10l7-5z"/></svg></button>
+        <button type="button" id="next" class="key" title="다음 곡 (End)" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3v10l9-5z"/><rect x="12" y="3" width="2" height="10"/></svg></button>
+        <button type="button" id="play" class="key key-play" title="재생 / 일시정지 (Space)" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path class="i-play" d="M4 2v12l10-6z"/><g class="i-pause"><rect x="3" y="2" width="3.5" height="12" rx=".5"/><rect x="9.5" y="2" width="3.5" height="12" rx=".5"/></g></svg></button>
+        <button type="button" id="stop" class="key" title="정지" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="10" height="10" rx="1"/></svg></button>
       </div>
-      <div id="scope-body" class="scope-body">
-        <div id="meters" class="meters"></div>
-        <p class="scope-note">
-          성부마다 기둥이 하나씩 섭니다. 넓은 막대는 그 성부에서 실제로 나온
-          소리의 크기, 옆의 가는 막대는 그 소리를 흔드는 변조기의 세기입니다.
-          OPL은 스펙트럼을 내놓는 물건이 아니라 성부를 FM으로 울리는 물건이라,
-          주파수 막대그래프 대신 각 성부가 지금 무엇을 어떻게 울리고 있는지를
-          보여 줍니다. 성부 수는 음원 칩이 정합니다 — OPL2는 9개(리듬 모드에서는
-          6+5), OPL3는 18개(리듬 모드에서는 15+5)이고, 리듬 성부는 언제나 맨
-          뒤 다섯 개입니다. ◄ ►는 그 성부가 한쪽으로 치우쳐 나간다는 표시로,
-          OPL3에만 나타납니다.
-        </p>
-      </div>
-    </section>
 
-    <div id="lyrics" class="lyrics" hidden>
-      <div id="credits" class="credits"></div>
-      <div class="lines-wrap">
-        <div id="view" class="lines" tabindex="0" aria-label="가사"><div id="lines" class="lines-inner"></div></div>
-        <button type="button" id="follow" class="follow" hidden>현재 위치로</button>
+      <div class="shift" role="group" aria-label="빠르기">
+        <button type="button" id="slower" class="key" title="느리게 (,)" disabled>느리게</button>
+        <button type="button" id="speed" class="key key-label" title="원래 빠르기로" disabled>빠르기</button>
+        <button type="button" id="faster" class="key" title="빠르게 (.)" disabled>빠르게</button>
       </div>
+      <div class="shift" role="group" aria-label="음높이">
+        <button type="button" id="lower" class="key" title="반음 내림 (Del)" disabled>남자</button>
+        <button type="button" id="key" class="key key-label" title="원래 음높이로" disabled>키</button>
+        <button type="button" id="higher" class="key" title="반음 올림 (Ins)" disabled>여자</button>
+      </div>
+
+      <label class="volume">
+        <span>음량</span>
+        <input type="range" id="gain" min="0" max="100" value="100">
+      </label>
     </div>
   </section>
 
+  <!-- ── 3. lyrics ──────────────────────────────────────────────────── -->
+  <section class="unit unit-lyrics" aria-label="가사">
+    <div class="seek">
+      <span id="clock" class="time">0:00</span>
+      <input type="range" id="progress" min="0" max="1000" value="0" disabled aria-label="재생 위치">
+      <span id="length" class="time">0:00</span>
+    </div>
+    <div id="credits" class="credits"></div>
+    <div class="lines-wrap">
+      <div id="view" class="lines lcd" tabindex="0" aria-label="가사"><div id="lines" class="lines-inner"></div></div>
+      <p id="nolyrics" class="nolyrics">가사(.iss)가 없는 곡입니다</p>
+      <button type="button" id="follow" class="follow" hidden>현재 위치로</button>
+    </div>
+  </section>
+
+  <!-- ── 4. status strip ────────────────────────────────────────────── -->
+  <section class="unit unit-status" aria-label="소리 설정">
+    <div class="switch" role="radiogroup" aria-label="음색">
+      <span class="switch-name">음색</span>
+      <button type="button" role="radio" data-set="tone" data-value="standard">표준</button>
+      <button type="button" role="radio" data-set="tone" data-value="raw">거칠게</button>
+    </div>
+    <div class="switch" role="radiogroup" aria-label="스피커">
+      <span class="switch-name">스피커</span>
+      <button type="button" role="radio" data-set="speaker" data-value="default">기본값</button>
+      <button type="button" role="radio" data-set="speaker" data-value="vintage">그 시절</button>
+    </div>
+    <div class="switch" role="radiogroup" aria-label="출력">
+      <span class="switch-name">출력</span>
+      <button type="button" role="radio" data-set="output" data-value="stereo">스테레오</button>
+      <button type="button" role="radio" data-set="output" data-value="mono">모노</button>
+    </div>
+    <div class="switch" role="radiogroup" aria-label="반복">
+      <span class="switch-name">반복</span>
+      <button type="button" role="radio" data-set="loop" data-value="off">끔</button>
+      <button type="button" role="radio" data-set="loop" data-value="on">한 곡</button>
+    </div>
+  </section>
+</main>
+
+<div id="dropveil" class="dropveil" hidden><p>놓으면 열립니다</p></div>
+
+<div class="below">
   <a class="remix remix-idle" id="remix" href="https://microtone.cc/" target="_blank">
     <span class="remix-mark">♪</span>
     <span class="remix-text">
@@ -89,30 +132,54 @@
       <strong>이야기 뮤직 사운드</strong>(<code>.ims</code>)는 1990년대 PC통신
       접속기 <b>이야기</b>가 애드립 카드로 음악을 울리려고 쓰던 파일 형식입니다.
       애드립의 <code>.rol</code> 포맷을 고쳐 만든 것이고, 곡 제목과 가사는 2바이트
-      조합형 한글로 들어 있습니다.
+      조합형 한글로 들어 있습니다. 이 플레이어는 그 시절 곡과 함께 돌던
+      <b>IMPLAY</b>의 모양과 기능을 따릅니다.
     </p>
     <p>
       이 페이지는 그 시절의 YM3812(OPL2)와 YMF262(OPL3) 음원을 브라우저 안에서
       흉내 내어 파일을 그대로 재생합니다. 서버로 아무것도 보내지 않으며, 파일은
-      브라우저 밖으로 나가지 않습니다.
+      브라우저 밖으로 나가지 않습니다. 여러 곡을 한꺼번에 놓으면 차례로 재생합니다.
     </p>
     <p>
       <code>.sop</code>은 같은 시절 같은 게시판에서 돌던 다른 트래커의 형식으로,
       이야기 것이 아니고 OPL2 것도 아닙니다. 성부 스무 개, 4연산자 음색, 좌우
       정위를 쓰는 OPL3 포맷이라 OPL3로 재생합니다.
     </p>
-    <p class="bank-note">
+    <p class="note">
+      <b>스테레오에 대하여.</b> IMPLAY는 OPL3가 달린 카드를 만나면 <code>.ims</code>를
+      스테레오로 울렸습니다. 모든 성부를 칩의 양쪽 뱅크에 한 번씩 두 번 울리고,
+      채널마다 정해진 자리로 소리를 벌려 놓는 방식입니다. 이 플레이어도 그대로
+      따라 합니다. <b>모노</b>로 바꾸면 OPL2 한 개로 울린 소리와 똑같아집니다.
+    </p>
+    <p class="note">
+      <b>빠르기와 키.</b> IMPLAY처럼 빠르기는 5%씩, 키는 반음씩 바꿉니다. 키를
+      바꾸면 다음에 치는 음부터 적용됩니다. IMPLAY는 드럼의 음높이까지 옮겼지만,
+      노래방으로 쓰기에는 드럼이 틀어질 뿐이라 여기서는 선율만 옮깁니다.
+    </p>
+    <p class="note">
+      <b>음색과 스피커.</b> <b>표준</b>은 오늘 FM 음원 카드를 새로 설계한다면
+      냈을 법한 소리로, 되먹임을 조금 줄이고 12 kHz 위를 살짝 깎습니다.
+      <b>거칠게</b>는 칩이 낸 소리 그대로입니다. 스피커를 <b>그 시절</b>로 두면
+      모니터 옆에 놓던 작은 PC 스피커로 듣는 소리를 흉내 냅니다.
+    </p>
+    <p class="note">
       <b>음색 뱅크에 대하여.</b> <code>.ims</code> 파일에는 음색의 <em>이름</em>만
       들어 있어서, 같은 이름을 가진 <code>.bnk</code> 뱅크가 있어야 소리가 납니다.
       그래서 이 페이지는 <code>STANDARD.BNK</code>를 함께 담아 두고, 뱅크를 따로
       놓지 않으면 그것을 씁니다. 곡 전용 뱅크를 함께 놓으면 그쪽이 우선하고,
       거기에 없는 음색만 내장 뱅크에서 찾습니다.
     </p>
+    <p class="keys">
+      <b>글쇠</b>
+      <kbd>Space</kbd> 재생·일시정지 · <kbd>Z</kbd><kbd>X</kbd> 되감기·빨리 감기 ·
+      <kbd>Home</kbd> 처음으로 · <kbd>End</kbd> 다음 곡 · <kbd>,</kbd><kbd>.</kbd> 빠르기 ·
+      <kbd>Ins</kbd><kbd>Del</kbd> 키
+    </p>
     <p class="links">
       <a href="https://github.com/curioustorvald/IyagiMusic.js">소스와 포맷 명세 보기</a>
     </p>
   </section>
-</main>
+</div>
 
 <script type="module" src="app.js"></script>
 </body>
