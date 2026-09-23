@@ -1799,7 +1799,7 @@ class FormatError extends Error {}
  * @property {number[]} version
  * @property {string} title already Johab-decoded
  * @property {number} tickBeat @property {number} beatMeasure
- * @property {number} totalTick advisory; §1.5 -- FC is what ends the song
+ * @property {number} totalTick where the song ends, if FC has not come first; §1.5
  * @property {number} commandCount
  * @property {number} srcTickBeat the source ROL's tickBeat, or 0; §1.8
  * @property {boolean} percussive
@@ -2031,7 +2031,7 @@ function parseIms(data, options) {
     title: text(b, 6, 30, options),
     tickBeat: b[36],
     beatMeasure: b[37],
-    totalTick: dv.getInt32(38, true),   // §1.5: advisory, FC is what ends the song
+    totalTick: dv.getInt32(38, true),   // §1.5: IMPLAY ends the song here, FC or not
     commandCount: dv.getInt32(46, true),
     srcTickBeat: b[50],                 // §1.8: the source ROL's tickBeat, or 0
     percussive: b[58] !== 0,
@@ -3776,8 +3776,15 @@ class Sequencer {
  */
 function* imsSequence(song) {
   const melodicOnly = !song.percussive;
+  // §1.5: the song ends at totalTick, or at FC if that comes first -- as in
+  // IMPLAY, which reads no event once its tick counter has reached totalTick.
+  // Where the two disagree, everything past totalTick in the corpus is
+  // silence or damage. A totalTick of 0 or less would end IMPLAY before the
+  // first note; no file has one, and this plays to FC rather than to nothing.
+  const stop = song.totalTick > 0 ? song.totalTick : Number.MAX_SAFE_INTEGER;
   for (const ev of imsEvents(song)) {
     const status = ev.status;
+    if (ev.tick >= stop) { yield { tick: stop, type: END }; return; }
     if (status === 0xfc) { yield { tick: ev.tick, type: END }; return; }
     if (status === 0xf0) {
       yield { tick: ev.tick, type: TEMPO, tempo: song.tempo * (ev.a + ev.b / 128) };
@@ -3809,7 +3816,9 @@ function* imsSequence(song) {
         break;                                        // B0 and D0 are ignored
     }
   }
-  yield { tick: Number.MAX_SAFE_INTEGER, type: END };
+  // A stream that runs out without FC -- only damaged files do (§1.5) --
+  // still ends where IMPLAY's counter would.
+  yield { tick: stop, type: END };
 }
 
 /**
