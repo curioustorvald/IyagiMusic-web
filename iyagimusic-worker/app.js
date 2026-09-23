@@ -155,7 +155,7 @@ function onWorkletMessage(msg) {
     case "position":
       clock = { position: msg.position, tempo: msg.tempo };
       updateClock();
-      updateLyrics(msg.tick);
+      updateLyrics(msg.lyricTick);
       updateChannels(msg);
       scope.push(msg);
       break;
@@ -832,6 +832,7 @@ function clearLyricMarks() {
   }
 }
 
+/** `tick` is the worklet's `lyricTick`: the cues' own unit, not the song's. */
 function updateLyrics(tick) {
   if (!lyricState) return;
   const { iss, nodes } = lyricState;

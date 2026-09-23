@@ -1729,6 +1729,12 @@ const BNK_PATCH_RECORD_SIZE = 30;
 const ISS_HEADER_SIZE = 154;
 const ISS_RECORD_SIZE = 5;
 const ISS_LINE_SIZE = 64;
+/**
+ * The clock an `.iss` cue's `tick` counts: IMS ticks, 240 to the beat. It is
+ * the song's own tick only for an `.ims`; beside a `.sop` the lyric still
+ * counts 240 to the beat, whatever the song's `tickBeat` (§4.4).
+ */
+const ISS_TICK_BEAT = 240;
 const SOP_HEADER_SIZE = 76;
 /** SOP §3.1: instType byte, then char[8] shortName and char[19] longName. */
 const SOP_INST_NAME_SIZE = 28;
@@ -1855,9 +1861,10 @@ class FormatError extends Error {}
  * One lyric cue: a run of cells to paint, on top of whatever the line already
  * has painted. §4.2.
  * @typedef {object} IssCue
- * @property {number} tick when IMPLAY paints it, in song ticks -- the stored
- *   value scaled to ticks (§4.2) and held back behind any earlier record in
- *   the file, because IMPLAY walks the records in file order
+ * @property {number} tick when IMPLAY paints it, in IMS ticks (`ISS_TICK_BEAT`
+ *   to the beat, §4.4) -- the stored value scaled to ticks (§4.2) and held
+ *   back behind any earlier record in the file, because IMPLAY walks the
+ *   records in file order
  * @property {number} stored the record's own tick field, as stored
  * @property {number} line @property {number} startX @property {number} widthX
  */
@@ -3637,6 +3644,22 @@ class Sequencer {
       Math.round(this.timeline().secondsAt(target) * this.sampleRate);
   }
 
+  /**
+   * Where the song actually is, in ticks, with the fraction. `tick` is not
+   * that: it moves to the next event's tick as soon as the samples leading up
+   * to that event are banked, so it runs ahead by up to a whole gap between
+   * events. Nothing that drives the chip minds, but a display does -- a SOP's
+   * events can be half a beat apart, and a lyric cue lit that early is
+   * visibly early. This backs the banked samples out again. A speed change
+   * part-way through a gap makes it slightly wrong until the next event,
+   * because the samples were banked at the old speed.
+   * @type {number}
+   */
+  get playhead() {
+    const owed = this.sampleCursor > 0 ? this.sampleCursor / (this.tickSeconds * this.sampleRate) : 0;
+    return Math.max(0, this.tick - owed);
+  }
+
   /** How far through the song we are, in seconds. */
   get seconds() {
     return this.samplesRendered / this.sampleRate;
@@ -4490,8 +4513,24 @@ class IyagiMusic {
   /** Seconds of song rendered so far. */
   get seconds() { return this.sequencer.samplesRendered / NATIVE_RATE; }
 
-  /** Current tick, for lining lyrics up. */
+  /** The sequencer's tick: the next event's, once the samples up to it are banked. */
   get tick() { return this.sequencer.tick; }
+
+  /**
+   * Where the song is in the unit an `.iss` cue is stamped in, which is what
+   * to hold lyrics against: 240 to the beat, fractional (FILE_FORMATS §4.4).
+   * For an `.ims` that is the song's own tick. A `.sop` counts `tickBeat` to
+   * the beat, and a lyric beside it still counts 240, so it is scaled. A
+   * `.rol` is left in its own ticks: no `.rol` in the corpus has lyrics, so
+   * there is nothing to measure a rule against.
+   * @type {number}
+   */
+  get lyricTick() {
+    // The chip samples rendered but not yet resampled out are still to come.
+    const buffered = (this.nativeLen - this.nativePos) / (this.sequencer.tickSeconds * NATIVE_RATE);
+    const at = Math.max(0, this.sequencer.playhead - buffered);
+    return this.kind === "sop" ? at * ISS_TICK_BEAT / this.song.tickBeat : at;
+  }
 
   // ── what the player looks like from outside ─────────────────────────────
 
@@ -4697,10 +4736,10 @@ class IyagiMusic {
    * `resolveIssSpans` -- a cue marks the right edge of the highlight, not an
    * isolated run.
    *
-   * @param {number} [tick]
+   * @param {number} [tick] in the cues' own unit, as `lyricTick` gives it
    * @returns {LyricSpan|null}
    */
-  lyricAt(tick = this.tick) {
+  lyricAt(tick = this.lyricTick) {
     if (!this.lyrics) return null;
     this.lyricSpans ??= resolveIssSpans(this.lyrics);
     let index = -1;
@@ -4819,6 +4858,9 @@ class IyagiProcessor extends AudioWorkletProcessor {
       position: this.music.position,
       tempo: this.music.tempo,
       tick: this.music.tick,
+      // What lyrics are held against: not `tick`, which is the next event's
+      // and in the song's own unit (FILE_FORMATS §4.4).
+      lyricTick: this.music.lyricTick,
       ended: this.music.ended,
       meter: this.music.readMeters(this.meter),
       voices: this.music.voiceCount,
