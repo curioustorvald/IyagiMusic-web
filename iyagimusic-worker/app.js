@@ -79,17 +79,17 @@ const scope = createVisualiser($("meter"), $("chipline"));
  * "그 시절": the song through a small desktop PC speaker, as an impulse
  * response (SMOLSPKR.BIN: float32 little-endian, stereo interleaved, 48 kHz).
  *
- * The response is anything but quiet -- +17 dB at 200 Hz, and -14 dB at
- * 50 Hz and 15 kHz -- so it is applied un-normalised and brought back by one
- * fixed gain. That gain matches the two paths by loudness: across 79 corpus
+ * The response is anything but quiet -- +24 dB at 3.5 kHz, and -27 dB at
+ * 90 Hz -- so it is applied un-normalised and brought back by one fixed
+ * gain. That gain matches the two paths by loudness: across 79 corpus
  * songs (60 .ims, 19 .sop, 20 s each from 10 s in, rendered as this page
- * plays them), BS.1770 integrated loudness came out 16.3 LU higher through
- * the speaker, median, with a spread of 1.5. 10^(-16.3/20) = 0.153. At that
- * gain 4 of the 79 peak above full scale, the worst by 1.2 dB.
+ * plays them), BS.1770 integrated loudness came out 12.45 LU higher through
+ * the speaker, median, with a spread of 1.8. 10^(-12.45/20) = 0.239. At that
+ * gain 12 of the 79 peak above full scale, the worst by 3.3 dB.
  */
 const SPEAKER_URL = "SMOLSPKR.BIN";
 const SPEAKER_RATE = 48000;
-const SPEAKER_GAIN = 0.153;
+const SPEAKER_GAIN = 0.239;
 const CROSSFADE_S = 0.03;
 
 async function speakerBuffer() {
