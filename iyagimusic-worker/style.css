@@ -421,6 +421,17 @@ button:disabled { opacity: .38; cursor: default; }
 .remix-text small { color: var(--dim); font-size: .8rem; }
 .remix-go { margin-left: auto; color: var(--accent); font-size: 1.2rem; }
 
+/* The advert for 이야기 뮤직 아카이브 wears the Microtone banner's shape, in the
+   amber the archive's own IMS Studio banner uses. Hidden until the archive
+   is live: delete the `display: none` line to show it. (The archive embeds
+   this player and hides the advert inside itself regardless.) */
+.archive-ad {
+  display: none;
+  background: linear-gradient(100deg, #4c4536, var(--panel) 60%);
+}
+.archive-ad:hover { border-color: var(--accent-2); }
+.archive-ad .remix-mark, .archive-ad .remix-go { color: var(--accent-2); }
+
 .about { color: var(--dim); font-size: .9rem; max-width: 46rem; }
 .about h3 { color: var(--ink); font-size: 1rem; margin: 0 0 .6rem; }
 .about code { color: var(--dim); }
