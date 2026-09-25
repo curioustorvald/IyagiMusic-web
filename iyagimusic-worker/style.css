@@ -391,6 +391,10 @@ button:disabled { opacity: .38; cursor: default; }
   gap: 1.25rem;
 }
 
+/* Side by side once there's room for both without squeezing either card's
+   text down to a sliver; one column below that, same as the rack itself. */
+.handoffs { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+
 .remix {
   display: flex;
   align-items: center;
@@ -422,13 +426,17 @@ button:disabled { opacity: .38; cursor: default; }
 .remix-go { margin-left: auto; color: var(--accent); font-size: 1.2rem; }
 
 /* The advert for 이야기 뮤직 아카이브 wears the Microtone banner's shape, in the
-   amber the archive's own IMS Studio banner uses. (The archive's copy of
-   this player never carries it: its sync-player.sh drops the element.) */
-.archive-ad {
+   amber the archive's own IMS Studio banner uses, and now the same 3.5" floppy
+   mark that banner draws (the text glyph 塔 it used to carry read as a stray
+   Chinese character rather than an icon). (The archive's copy of this player
+   never carries it: its sync-player.sh drops the element.)
+   Named archive-go, not archive-ad -- generic adblock filter lists hide any
+   element whose class ends in "-ad", and archive-ad did. */
+.archive-go {
   background: linear-gradient(100deg, #4c4536, var(--panel) 60%);
 }
-.archive-ad:hover { border-color: var(--accent-2); }
-.archive-ad .remix-mark, .archive-ad .remix-go { color: var(--accent-2); }
+.archive-go:hover { border-color: var(--accent-2); }
+.archive-go .remix-mark, .archive-go .remix-go { color: var(--accent-2); }
 
 .about { color: var(--dim); font-size: .9rem; max-width: 46rem; }
 .about h3 { color: var(--ink); font-size: 1rem; margin: 0 0 .6rem; }
@@ -445,6 +453,7 @@ button:disabled { opacity: .38; cursor: default; }
   .brand { grid-column: 1 / -1; flex-direction: row; align-items: baseline; gap: .6rem; }
   .brand p { margin: 0; }
   .open { margin: 0 0 0 auto; }
+  .handoffs { grid-template-columns: 1fr; }
 }
 @media (max-width: 42rem) {
   .rack { margin-top: .75rem; padding: 0 .5rem; }
