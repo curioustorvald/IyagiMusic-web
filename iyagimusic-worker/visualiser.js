@@ -10,7 +10,12 @@
 // The column count comes from the worklet rather than from a constant here,
 // because it is 9, 11, 18 or 20 depending on the chip and the mode. Only one
 // rule is assumed, and the chip guarantees it: **the five rhythm voices are
-// always the last five columns.**
+// always the last five of the chip's columns.**
+//
+// A song with sample voices -- a version-0.2 SOP's WAV tracks (SOP §10) --
+// gets a column for each after the chip's, set a little apart, because they
+// are not the chip's. The worklet sends their rows separately, in the same
+// layout, and they are drawn by the same code.
 //
 // Drawn on a canvas because it redraws every frame: twenty columns of DOM
 // nodes restyled at 60 Hz costs more than painting them.
@@ -38,6 +43,8 @@ const CAP_FALL_DB_PER_S = 16;
 
 /** Column labels in rhythm mode, where the last five voices are drums. */
 const DRUM_NAMES = ["BD", "SD", "TT", "TC", "HH"];
+/** The gap before the sample columns, in columns. */
+const SAMPLE_GAP = 0.6;
 
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -55,8 +62,10 @@ export function createVisualiser(canvas, chipline) {
   const g = canvas.getContext("2d");
   let columns = [];
   let voices = 0;
+  let samples = 0;
   let rhythm = false;
   let meter = null;
+  let sampleMeter = null;
   let meterAt = 0;
   let running = false;
   let lastFrame = 0;
@@ -72,6 +81,7 @@ export function createVisualiser(canvas, chipline) {
     colour = {
       low: v("--accent"), mid: v("--accent-2"), high: v("--hot"),
       unlit: v("--unlit"), cap: v("--ink"), text: v("--recede"), drum: v("--accent-2"),
+      sample: v("--hot"),
     };
   }
   readColours();
@@ -87,10 +97,11 @@ export function createVisualiser(canvas, chipline) {
   }
   new ResizeObserver(resize).observe(canvas);
 
-  function build(count, isRhythm) {
+  function build(count, isRhythm, sampleCount) {
     voices = count;
+    samples = sampleCount;
     rhythm = isRhythm;
-    columns = Array.from({ length: count }, () => ({
+    columns = Array.from({ length: count + sampleCount }, () => ({
       level: 0, cap: 0, capAt: 0, on: false,
     }));
   }
@@ -104,7 +115,7 @@ export function createVisualiser(canvas, chipline) {
     const n = columns.length || 11;
     const pad = 8, labelH = 13, lampH = 5, gapY = 4;
     const top = pad, bottom = height - pad - labelH - lampH - gapY * 2;
-    const slot = (width - pad * 2) / n;
+    const slot = (width - pad * 2) / (n + (samples ? SAMPLE_GAP : 0));
     const colW = Math.max(3, Math.min(22, slot * 0.62));
     const rungH = (bottom - top) / RUNGS;
     const drums = rhythm ? voices - RHYTHM_VOICES : voices;
@@ -114,7 +125,8 @@ export function createVisualiser(canvas, chipline) {
 
     for (let v = 0; v < n; v++) {
       const c = columns[v] ?? { level: 0, cap: 0, on: false };
-      const x = pad + slot * v + (slot - colW) / 2;
+      const sample = columns.length && v >= voices;
+      const x = pad + slot * (v + (sample ? SAMPLE_GAP : 0)) + (slot - colW) / 2;
       const lit = rungsOf(c.level);
       const capRung = rungsOf(c.cap);
       for (let r = 0; r < RUNGS; r++) {
@@ -132,12 +144,13 @@ export function createVisualiser(canvas, chipline) {
         g.globalAlpha = 1;
       }
       // The lamp: IMPLAY's row of squares under its bars, lit on a key-on.
-      const drum = columns.length && v >= drums;
+      const drum = columns.length && v >= drums && !sample;
       const lampY = bottom + gapY;
-      g.fillStyle = c.on ? (drum ? colour.drum : colour.low) : colour.unlit;
+      g.fillStyle = c.on ? (sample ? colour.sample : drum ? colour.drum : colour.low) : colour.unlit;
       g.fillRect(x, lampY, colW, lampH);
       g.fillStyle = colour.text;
-      const name = columns.length ? (drum ? DRUM_NAMES[v - drums] : String(v + 1)) : "";
+      const name = !columns.length ? ""
+        : sample ? `W${v - voices + 1}` : drum ? DRUM_NAMES[v - drums] : String(v + 1);
       g.fillText(name, x + colW / 2, height - pad);
     }
   }
@@ -156,12 +169,15 @@ export function createVisualiser(canvas, chipline) {
     let moving = false;
     for (let v = 0; v < columns.length; v++) {
       const c = columns[v];
-      const o = v * METER_STRIDE;
-      const target = fresh ? levelOf(meter[o + M_PEAK]) : 0;
+      // The sample voices' rows come in their own buffer, laid out alike.
+      const rows = v < voices ? meter : sampleMeter;
+      const o = (v < voices ? v : v - voices) * METER_STRIDE;
+      const live = fresh && !!rows;
+      const target = live ? levelOf(rows[o + M_PEAK]) : 0;
       c.level = Math.max(target, c.level - fall);
       if (c.level >= c.cap) { c.cap = c.level; c.capAt = now; }
       else if (now - c.capAt > CAP_HOLD_MS) c.cap = Math.max(c.level, c.cap - capFall);
-      c.on = fresh && meter[o + M_KEY_ON] > 0;
+      c.on = live && rows[o + M_KEY_ON] > 0;
       if (c.level > 0.001 || c.cap > 0.001 || c.on) moving = true;
     }
     paint();
@@ -181,6 +197,7 @@ export function createVisualiser(canvas, chipline) {
     if (extra) parts.push(extra);
     parts.push(rhythm ? `리듬 ${voices - RHYTHM_VOICES}+${RHYTHM_VOICES}성부` : `${voices}성부`);
     if (flags & CF_FOUROP) parts.push("4연산자");
+    if (samples) parts.push(`PCM ${samples}성부`);
     if (flags & CF_TREMOLO) parts.push("트레몰로");
     if (flags & CF_VIBRATO) parts.push("비브라토");
     return parts.join(" · ");
@@ -190,8 +207,12 @@ export function createVisualiser(canvas, chipline) {
     /** Take one frame of chip status from the worklet. */
     push(msg) {
       const isRhythm = (msg.chipFlags & CF_RHYTHM) !== 0;
-      if ((msg.voices | 0) !== voices || isRhythm !== rhythm) build(msg.voices | 0, isRhythm);
+      const sampleCount = msg.sampleVoices | 0;
+      if ((msg.voices | 0) !== voices || isRhythm !== rhythm || sampleCount !== samples) {
+        build(msg.voices | 0, isRhythm, sampleCount);
+      }
       meter = msg.meter;
+      sampleMeter = msg.samples ?? null;
       meterAt = performance.now();
       const text = describe(msg.chipFlags, this.mode);
       if (text !== label) { label = text; chipline.textContent = text; }
@@ -202,7 +223,9 @@ export function createVisualiser(canvas, chipline) {
     /** Forget the song: no columns, everything at rest. */
     clear() {
       meter = null;
+      sampleMeter = null;
       voices = 0;
+      samples = 0;
       columns = [];
       label = "";
       chipline.textContent = "—";

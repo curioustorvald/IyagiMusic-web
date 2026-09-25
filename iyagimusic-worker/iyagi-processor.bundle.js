@@ -3497,12 +3497,184 @@ class AdlibDriver {
   }
 }
 
+// == src/pcm.js ==
+// Sample voices, mixed beside the chip.
+//
+// Nothing here is an OPL. A format that carries digital audio -- a
+// version-0.2 SOP's WAV tracks (SOP §10), and whatever else turns up -- has
+// its samples played by these voices and added into the chip's own output,
+// at the chip's own rate, so they sit on the same clock as the FM and are
+// resampled with it on the way out. Like `opl/chip.js` this is pure
+// computation: no DOM, no Web Audio, no `console`.
+//
+// It knows nothing about notes. The caller says what rate a sample plays at,
+// because how a note becomes a rate is a property of the format -- and for
+// SOP 0.2, not yet a known one (SOP §10.6).
+
+
+/**
+ * A full-scale sample is as loud on the bus as one full-amplitude operator,
+ * which the chip scales to about 0.5 (MIX_SCALE in `opl/chip.js`). So a
+ * sample voice is one more voice, and the player's headroom -- measured for
+ * the chip's voices -- is not thrown by it.
+ */
+const PCM_SCALE = 0.5;
+
+/**
+ * Volume 0..127 as a gain, by the law the driver uses on a carrier at full
+ * level: `63 − ((63 × volume + 64) >> 7)` steps of 0.75 dB (SOP §8). A sample
+ * at volume 96 is then 12 dB down, exactly as an FM voice beside it is, which
+ * matters more than any absolute choice would: the only thing a listener can
+ * judge is the balance.
+ * @param {number} volume
+ */
+function pcmVolumeGain(volume) {
+  const v = Math.max(0, Math.min(127, volume | 0));
+  const steps = 63 - ((63 * v + 64) >> 7);
+  return v === 0 ? 0 : 10 ** (-0.75 * steps / 20);
+}
+
+/**
+ * A sample, as the mixer takes it: signed 8-bit mono at `rate`. The shape a
+ * SOP's `SopPcm` already has.
+ * @typedef {object} PcmSample
+ * @property {Int8Array} samples
+ * @property {number} rate Hz, at which the samples play as recorded
+ */
+
+class PcmVoice {
+  constructor() { this.reset(); }
+
+  reset() {
+    /** @type {PcmSample|null} what the voice will play at its next trigger */
+    this.sample = null;
+    /** @type {Int8Array|null} what it is playing now; null when silent */
+    this.playing = null;
+    this.pos = 0;
+    this.step = 0;
+    this.volume = 96;
+    this.gain = pcmVolumeGain(96);
+    this.pan = PAN_CENTRE;
+    /** Loudest |output| since the last `takePeak`, on the chip's bus scale. */
+    this.peak = 0;
+  }
+}
+
+class PcmMixer {
+  /**
+   * @param {number} voices how many sample voices
+   * @param {number} [rate] the rate `mix` is called at; the chip's, by default
+   */
+  constructor(voices, rate = NATIVE_RATE) {
+    this.rate = rate;
+    this.voices = Array.from({ length: voices }, () => new PcmVoice());
+  }
+
+  get voiceCount() { return this.voices.length; }
+
+  reset() { for (const v of this.voices) v.reset(); }
+
+  /** @param {number} voice @param {PcmSample|null} sample */
+  setSample(voice, sample) { this.voices[voice].sample = sample; }
+
+  /** @param {number} voice @param {number} volume 0..127 */
+  setVolume(voice, volume) {
+    const v = this.voices[voice];
+    v.volume = volume;
+    v.gain = pcmVolumeGain(volume);
+  }
+
+  /** @param {number} voice @param {number} pan one of the PAN_* values */
+  setPan(voice, pan) { this.voices[voice].pan = pan; }
+
+  /**
+   * Start the voice's sample from the top, at `rate` Hz. A voice already
+   * playing is cut and restarted, as a tracker's is.
+   * @param {number} voice @param {number} rate
+   */
+  trigger(voice, rate) {
+    const v = this.voices[voice];
+    if (!v.sample || !(rate > 0)) { v.playing = null; return; }
+    v.playing = v.sample.samples;
+    v.pos = 0;
+    v.step = rate / this.rate;
+  }
+
+  /** Change the rate of what is playing, without restarting it. */
+  retune(voice, rate) {
+    const v = this.voices[voice];
+    if (v.playing && rate > 0) v.step = rate / this.rate;
+  }
+
+  /** @param {number} voice */
+  stop(voice) { this.voices[voice].playing = null; }
+
+  /** Whether any voice is sounding. */
+  get active() { return this.voices.some((v) => v.playing); }
+
+  /**
+   * The loudest this voice has been since the last call, on the same scale
+   * as the chip's meter peaks, and start counting again. For a display, as
+   * the chip's own `readMeters` is.
+   * @param {number} voice
+   */
+  takePeak(voice) {
+    const v = this.voices[voice];
+    const p = v.peak;
+    v.peak = 0;
+    return p;
+  }
+
+  /**
+   * Add `count` samples of every sounding voice into `left` (and `right`, on
+   * a stereo bus) at `offset`. Linear interpolation: these are 8-bit sounds
+   * at 8 to 22 kHz, and anything finer would be polishing their noise.
+   *
+   * On a stereo bus a centred voice goes into both sides at full level, as
+   * the OPL3's own centred channels do, so a mono fold of the two is the
+   * voice exactly; PAN_NONE, both switches off, is silence there as on the
+   * chip.
+   *
+   * @param {Float32Array} left @param {Float32Array|null} right
+   * @param {number} offset @param {number} count
+   */
+  mix(left, right, offset, count) {
+    for (const v of this.voices) {
+      const s = v.playing;
+      if (!s) continue;
+      const g = (v.gain * PCM_SCALE) / 128;
+      // A mono bus has no pan to honour, as a mono chip has none.
+      const toL = right ? (v.pan === PAN_LEFT || v.pan === PAN_CENTRE) : true;
+      const toR = !!right && (v.pan === PAN_RIGHT || v.pan === PAN_CENTRE);
+      const last = s.length - 1;
+      let pos = v.pos;
+      let peak = v.peak;
+      for (let n = 0; n < count; n++) {
+        const i = Math.floor(pos);
+        if (i >= last) { v.playing = null; break; }
+        const f = pos - i;
+        const x = (s[i] + (s[i + 1] - s[i]) * f) * g;
+        if (toL) left[offset + n] += x;
+        if (toR) right[offset + n] += x;
+        // Heard or not: a voice panned to nothing still moves its meter, as a
+        // chip channel with both switches off does.
+        const a = x < 0 ? -x : x;
+        if (a > peak) peak = a;
+        pos += v.step;
+      }
+      v.pos = pos;
+      v.peak = peak;
+    }
+  }
+}
+
 // == src/sequencer.js ==
 // Turning a parsed song into driver calls, on a sample-accurate clock.
 //
 // Both formats reduce to the same thing: a stream of events carrying absolute
 // tick positions, plus a tempo that events may change. The sequencer owns the
 // clock (docs/ENGINE_SPEC.en.md §9) and the driver owns the chip.
+
 
 
 
@@ -3534,6 +3706,12 @@ const NOTE_ON = 0, NOTE_OFF = 1, VOLUME = 2, PATCH = 3, BEND = 4,
  * @property {boolean} [wide] SOP: a PATCH for a voice whose channel pair is joined
  * @property {number} [tempo] beats per minute
  * @property {number} [order] tie-break within a tick, for ROL's parallel tracks
+ * @property {boolean} [pcm] the event is for a sample voice, not a chip voice:
+ *   `voice` counts the sample voices from 0, a PATCH carries `sample`, and a
+ *   BEND carries `cents`
+ * @property {import("./pcm.js").PcmSample|null} [sample] a sample voice's PATCH
+ * @property {string} [name] the sample's name, for a display
+ * @property {number} [cents] a sample voice's BEND, from its note's own pitch
  */
 
 /**
@@ -3563,6 +3741,8 @@ class Sequencer {
    * @param {boolean} [opts.sop]            play `sopSequence` events the way
    *   NOTE.EXE does (SOP §8.1); the driver takes SOP pitches and joins pairs
    *   as the events say
+   * @param {number} [opts.sampleVoices]   how many sample voices the `pcm`
+   *   events address; none by default. They are mixed into the chip's output.
    */
   constructor(opts) {
     this.chip = opts.chip;
@@ -3593,6 +3773,26 @@ class Sequencer {
      * @type {number}
      */
     this.transpose = 0;
+    /** @type {PcmMixer|null} the sample voices, if the song has any */
+    this.pcm = opts.sampleVoices > 0 ? new PcmMixer(opts.sampleVoices, this.sampleRate) : null;
+    /**
+     * How a sample voice's note becomes a playback rate. A number is the note
+     * at which a sample plays at its own recorded rate, every semitone away
+     * from it a twelfth of an octave; null plays every note at the recorded
+     * rate. Which of these a format means is the format's business -- for
+     * SOP 0.2 it is SOP_SAMPLE_REFERENCE, which the player sets -- so the
+     * sequencer assumes nothing. It reaches the next note struck. Survives
+     * `reset`.
+     * @type {number|null}
+     */
+    this.sampleReference = null;
+    /**
+     * Whether a sample voice stops when its note ends, or plays its sample to
+     * the end. Also the format's business -- for SOP 0.2 it is
+     * SOP_SAMPLE_CUT, which the player sets. Survives `reset`.
+     * @type {boolean}
+     */
+    this.sampleCut = false;
     /** @type {Timeline|null} built on first use; see `timeline` */
     this.timelineCache = null;
     this.reset();
@@ -3614,6 +3814,16 @@ class Sequencer {
     this.driver.reset();
     this.driver.setMode(this.percussive);
     this.driver.setPitchRange(this.pitchRange);
+    this.pcm?.reset();
+    /** A sample voice's last note and bend, so a bend can retune it. */
+    this.sampleNote = new Array(this.pcm?.voiceCount ?? 0).fill(-1);
+    this.sampleCents = new Array(this.pcm?.voiceCount ?? 0).fill(0);
+    /**
+     * What each sample voice is set to play, by name, for a display: the
+     * sample voices' `voicePatchName`. Changes move `patchEpoch` too.
+     * @type {string[]}
+     */
+    this.sampleName = new Array(this.pcm?.voiceCount ?? 0).fill("");
     /** @type {number} */
     this.tempo = this.baseTempo;
     this.iterator = this.makeEvents[Symbol.iterator]();
@@ -3730,7 +3940,46 @@ class Sequencer {
     return this.samplesRendered / this.sampleRate;
   }
 
+  /** The rate a sample voice plays its sample at, for `note` and `cents`. */
+  #sampleRate(voice, note, cents) {
+    const sample = this.pcm.voices[voice].sample;
+    if (!sample) return 0;
+    const semis = (this.sampleReference === null ? 0 : note - this.sampleReference) + cents / 100;
+    return sample.rate * 2 ** (semis / 12);
+  }
+
+  /** An event for a sample voice. The mixer holds the state; this translates. */
+  #applyPcm(ev) {
+    const p = this.pcm;
+    if (!p || ev.voice >= p.voiceCount) return;
+    const v = ev.voice;
+    switch (ev.type) {
+      case NOTE_ON:
+        if (ev.volume !== undefined) p.setVolume(v, ev.volume);
+        this.sampleNote[v] = ev.note;
+        p.trigger(v, this.#sampleRate(v, ev.note, this.sampleCents[v]));
+        break;
+      case NOTE_OFF:
+        if (this.sampleCut) p.stop(v);
+        break;
+      case VOLUME: p.setVolume(v, ev.volume); break;
+      case PATCH: {
+        p.setSample(v, ev.sample ?? null);
+        const name = ev.name ?? "";
+        if (this.sampleName[v] !== name) { this.sampleName[v] = name; this.patchEpoch++; }
+        break;
+      }
+      case PAN: p.setPan(v, ev.pan); break;
+      case BEND:
+        this.sampleCents[v] = ev.cents ?? 0;
+        if (this.sampleNote[v] >= 0) p.retune(v, this.#sampleRate(v, this.sampleNote[v], this.sampleCents[v]));
+        break;
+      default: break;
+    }
+  }
+
   #apply(ev) {
+    if (ev.pcm) { this.#applyPcm(ev); return; }
     const d = this.driver;
     switch (ev.type) {
       case NOTE_ON:
@@ -3800,6 +4049,7 @@ class Sequencer {
     this.ended = false;
     this.tempo = this.baseTempo;
     for (let v = 0; v < this.driver.voiceCount; v++) this.driver.noteOff(v);
+    for (let v = 0; v < (this.pcm?.voiceCount ?? 0); v++) this.pcm.stop(v);
   }
 
   /**
@@ -3828,13 +4078,28 @@ class Sequencer {
     return this.#run(left, right, offset, count);
   }
 
+  /**
+   * Whether there is nothing left to render: the song has ended and no
+   * sample is still playing past its end. `ended` alone is the song's own
+   * END, which a sample struck just before it outlasts -- `ending.sop`'s last
+   * explosion runs 0.27 s past its song's end. The chip is kept running under
+   * such a tail, so its release goes with it, but no event is read.
+   * @type {boolean}
+   */
+  get finished() { return this.ended && !this.pcm?.active; }
+
   #run(out, right, offset, count) {
     let written = 0;
     while (written < count) {
       if (this.sampleCursor <= 0) {
-        if (this.ended) break;
-        this.#drain();
-        if (this.ended) break;
+        if (!this.ended) this.#drain();
+        if (this.ended) {
+          if (!this.pcm?.active) break;
+          // A sample's tail: render the rest of the block, then look again.
+          this.#tail(out, right, offset + written, count - written);
+          written = count;
+          break;
+        }
         // Advance to the next event's tick and bank the samples it is worth.
         const nextTick = this.pending.done ? this.tick + 1 : this.pending.value.tick;
         const deltaTicks = Math.max(1, nextTick - this.tick);
@@ -3844,6 +4109,9 @@ class Sequencer {
       const run = Math.min(count - written, Math.max(1, Math.floor(this.sampleCursor)));
       if (right) this.chip.generateStereo(out, right, offset + written, run);
       else this.chip.generate(out, offset + written, run);
+      // The samples go in on the chip's clock, before anything resamples it,
+      // so they land on the same sample as the FM event beside them.
+      this.pcm?.mix(out, right, offset + written, run);
       this.sampleCursor -= run;
       this.samplesRendered += run;
       this.songSamples += run * this.speed;
@@ -3854,6 +4122,18 @@ class Sequencer {
       if (right) right.fill(0, offset + written, offset + count);
     }
     return written;
+  }
+
+  /**
+   * Past the song's end, while a sample still plays. Song time does not move
+   * -- `position` stays at the end, where a progress bar wants it -- but
+   * rendered time does.
+   */
+  #tail(out, right, offset, count) {
+    if (right) this.chip.generateStereo(out, right, offset, count);
+    else this.chip.generate(out, offset, count);
+    this.pcm.mix(out, right, offset, count);
+    this.samplesRendered += count;
   }
 }
 
@@ -4014,6 +4294,34 @@ function sopTempo(bpm, tickBeat) {
   return ((PIT_HZ / divisor) / interruptsPerTick) * 60 / tickBeat;
 }
 
+/**
+ * SOP §10.6: the note at which a version-0.2 WAV track plays a sample at its
+ * recorded rate. The files cannot say; this was chosen by ear, against
+ * recordings of the game the known files come from. It is a C, where a
+ * tracker plays a sample as recorded.
+ */
+const SOP_SAMPLE_REFERENCE = 24;
+
+/**
+ * SOP §10.6: a version-0.2 sample stops when its note ends. Nothing could
+ * confirm it -- the one note it matters for is the last hit of the game's
+ * ending, and the game's cutscene ends before the music does -- so this is a
+ * judgement: it is the reading under which a note's length means anything.
+ */
+const SOP_SAMPLE_CUT = true;
+
+/**
+ * SOP §10.2: the tracks of a version-0.2 SOP that play samples -- mode 3 --
+ * in the order `sopSequence` gives them sample voices. Empty for version 0.1.
+ * @param {import("./formats.js").SopSong} song
+ * @returns {number[]}
+ */
+function sopSampleTracks(song) {
+  const out = [];
+  song.tracks.forEach((t, i) => { if (t.mode === 3) out.push(i); });
+  return out;
+}
+
 /** SOP §4.2: Note's volume for a track that has not had a volume event yet. */
 const SOP_DEFAULT_VOLUME = 96;
 
@@ -4054,9 +4362,13 @@ const SOP_DEFAULT_VOLUME = 96;
  * - **Panning is a voice setting**, so it is emitted per voice rather than per
  *   track, and lands wherever the track's notes landed. A mono chip drops it,
  *   except for what a corrupt value does to feedback.
- * - **Version 0.2's WAV tracks are not here** (§10.2). They play samples, and
- *   the sequence is for an FM chip; the samples are in the song's
- *   instruments for whoever mixes them.
+ * - **Version 0.2's WAV tracks go to sample voices** (§10.2), one each, in
+ *   track order, as `pcm` events: their instrument selects a sample, their
+ *   pitch becomes cents about the note, and their volume and pan follow the
+ *   same rules as the FM tracks beside them. A note becomes a NOTE_ON with
+ *   the note number as the file has it; what rate that means is the
+ *   sequencer's `sampleReference`, which for SOP 0.2 is SOP_SAMPLE_REFERENCE
+ *   (§10.6).
  *
  * @param {import("./formats.js").SopSong} song
  * @param {{melodicVoices:number, rhythmBase:number, fourOpPairs:number[][]}} [layout]
@@ -4076,11 +4388,12 @@ function sopSequence(song, layout) {
   const rhythmVoiceOf = (t) =>
     (percussive && t >= 6 && t < 6 + RHYTHM_VOICES ? rhythmBase + (t - 6) : -1);
   // §2 and §4.1: which tracks Note plays at all. §10.2: a version-0.2 WAV
-  // track (mode 3) plays samples, which no OPL voice can, so it is not
-  // sequenced here -- its notes would otherwise sound on whatever FM patch
-  // the track's default slot holds.
+  // track (mode 3) plays samples, which no OPL voice can; it gets a sample
+  // voice of its own instead, and is kept off the chip.
   const plays = (t) => song.tracks[t].mode !== 0 && song.tracks[t].mode !== 3
     && (percussive || (t !== 9 && t !== 10));
+  const sampleVoiceOf = new Array(nTracks).fill(-1);
+  sopSampleTracks(song).forEach((t, i) => { sampleVoiceOf[t] = i; });
   const centredPan = song.version[0] > 0 || song.version[1] >= 2;
 
   // §2: hand the four-operator channel pairs to the mode-1 tracks, in track
@@ -4112,7 +4425,7 @@ function sopSequence(song, layout) {
   const merged = [];
   for (const ev of song.control) merged.push({ ev, track: -1, source: 0 });
   for (let t = 0; t < nTracks; t++) {
-    if (!plays(t)) continue;
+    if (!plays(t) && sampleVoiceOf[t] < 0) continue;
     for (const ev of song.tracks[t].events) merged.push({ ev, track: t, source: 1 });
   }
   merged.sort((a, b) => a.ev.tick - b.ev.tick || a.source - b.source);
@@ -4177,11 +4490,55 @@ function sopSequence(song, layout) {
     globalVolume = value;
     for (let t = 0; t < nTracks; t++) {
       if (!touched[t]) continue;
+      if (sampleVoiceOf[t] >= 0) {
+        out.push({ tick, type: VOLUME, pcm: true, voice: sampleVoiceOf[t], volume: volumeOf(t), order: 2 });
+        continue;
+      }
       const voice = fixedVoiceOf(t);
       if (voice >= 0) emitVolume(tick, voice, t);
       else if (trackVoice[t] >= 0 && voiceTrack[trackVoice[t]] === t) {
         emitVolume(tick, trackVoice[t], t);
       }
+    }
+  };
+
+  /** The note-off already emitted for each sample voice, so a retrigger can drop it. */
+  const sampleOff = [];
+  /** §10.2: one event of a WAV track, for its sample voice. */
+  const sampleEvent = (ev, t, voice) => {
+    const at = { tick: ev.tick, pcm: true, voice };
+    switch (ev.code) {
+      case 6: {                                              // a sample, or nothing
+        // Every WAV track in the known files selects FM slot 0 at tick 0
+        // before any sample. Nothing can play that here, so it is passed over
+        // and the voice keeps what it had -- as an empty slot does in Note.
+        const inst = song.instruments[ev.value];
+        if (inst?.pcm) out.push({ ...at, type: PATCH, sample: inst.pcm, name: inst.shortName, order: 1 });
+        break;
+      }
+      case 4:
+        trackVolume[t] = ev.value;
+        out.push({ ...at, type: VOLUME, volume: volumeOf(t), order: 2 });
+        break;
+      case 5:                                                // 0..200 about 100: cents
+        out.push({ ...at, type: BEND, cents: ev.value - 100, order: 2 });
+        break;
+      case 7:
+        out.push({ ...at, type: PAN, pan: sopPan(ev.value, centredPan).pan, order: 2 });
+        break;
+      case 2: {
+        // A note struck while the last one's sample plays restarts it; the
+        // last one's note-off must not then stop the new one.
+        const pending = sampleOff[voice];
+        if (pending && pending.tick > ev.tick) pending.dead = true;
+        out.push({ ...at, type: NOTE_ON, note: ev.value, volume: volumeOf(t), order: 4 });
+        const off = { tick: ev.tick + Math.max(1, ev.length ?? 1), type: NOTE_OFF, pcm: true, voice, order: 3 };
+        out.push(off);
+        sampleOff[voice] = off;
+        break;
+      }
+      default:
+        break;
     }
   };
 
@@ -4197,6 +4554,12 @@ function sopSequence(song, layout) {
       continue;
     }
     touched[track] = true;
+    if (sampleVoiceOf[track] >= 0) {
+      // §4.3, §5: a global volume counts wherever it is; a tempo does not.
+      if (ev.code === 8) setGlobalVolume(ev.tick, ev.value);
+      else sampleEvent(ev, track, sampleVoiceOf[track]);
+      continue;
+    }
     const fixed = fixedVoiceOf(track);
     const held = fixed >= 0
       ? fixed
@@ -4365,6 +4728,8 @@ class IyagiMusic {
    *   the YM3812's without reloading. Ignored for a `.sop`, and when `chip`
    *   is given as anything but "auto".
    * @param {"raw"|"standard"} [opts.tone]   see `tone`; default "raw"
+   * @param {number|null} [opts.sampleReference] see `sampleReference`
+   * @param {boolean} [opts.sampleCut]       see `sampleCut`
    * @param {number} [opts.gain]             output scale; default by chip, see below
    * @param {(code:number)=>string|null} [opts.userGlyph]
    *   overrides the built-in mapping for Iyagi's own font glyphs
@@ -4434,7 +4799,13 @@ class IyagiMusic {
         percussive: this.song.percussive,
         sop: true,                            // SOP §8.1: play it as NOTE.EXE does
         patches: [],
+        // SOP §10.2: a version-0.2 WAV track is a sample voice of its own.
+        sampleVoices: sopSampleTracks(this.song).length,
       });
+      // §10.6: note 24 plays a sample as recorded, and the note's length is
+      // how long it plays.
+      this.sequencer.sampleReference = SOP_SAMPLE_REFERENCE;
+      this.sequencer.sampleCut = SOP_SAMPLE_CUT;
       this.instrumentCount = this.song.instruments.filter(Boolean).length;
     } else {
       this.song = parseRol(opts.song, this.textOptions);
@@ -4511,6 +4882,8 @@ class IyagiMusic {
     this.tone = opts.tone ?? "raw";
     /** @type {boolean} */
     this.monoMix = false;
+    if (opts.sampleReference !== undefined) this.sampleReference = opts.sampleReference;
+    if (opts.sampleCut !== undefined) this.sampleCut = opts.sampleCut;
     /** Scratch rows for folding a mirrored chip's meters; see `readMeters`. */
     this.meterScratch = this.mirror ? new Float32Array(METER_VOICES * METER_STRIDE) : null;
   }
@@ -4564,6 +4937,31 @@ class IyagiMusic {
   get transpose() { return this.sequencer.transpose; }
   set transpose(v) { this.sequencer.transpose = Math.trunc(v) || 0; }
 
+  /** How many sample voices the song has: four in a version-0.2 SOP, else none. */
+  get sampleVoiceCount() { return this.sequencer.pcm?.voiceCount ?? 0; }
+
+  /**
+   * How a sample voice's note becomes a playback rate: the note at which a
+   * sample plays at its own recorded rate, or null to play every note at that
+   * rate. A version-0.2 SOP starts at 24 (SOP §10.6), which was found by ear
+   * rather than read from anything, so it stays a setting. It reaches the
+   * next sample struck.
+   * @type {number|null}
+   */
+  get sampleReference() { return this.sequencer.sampleReference; }
+  set sampleReference(v) {
+    this.sequencer.sampleReference = v === null || v === undefined ? null : Math.trunc(v);
+  }
+
+  /**
+   * Whether a sample stops when its note ends (true) or plays to its own end
+   * (false). A version-0.2 SOP starts with true (SOP §10.6), a judgement
+   * rather than a finding, so it stays a setting.
+   * @type {boolean}
+   */
+  get sampleCut() { return this.sequencer.sampleCut; }
+  set sampleCut(v) { this.sequencer.sampleCut = !!v; }
+
   /** The song's tempo right now, in bpm, before `speed`. */
   get tempo() { return this.sequencer.tempo; }
 
@@ -4600,8 +4998,11 @@ class IyagiMusic {
   get volume() { return this.gain / this.headroom; }
   set volume(v) { this.gain = this.headroom * (v > 0 ? v : 0); }
 
-  /** Whether the song has run past its end marker. */
-  get ended() { return this.sequencer.ended && this.nativePos >= this.nativeLen; }
+  /**
+   * Whether the song has run past its end marker -- and past the end of any
+   * sample still playing there, which is let ring out (`Sequencer.finished`).
+   */
+  get ended() { return this.sequencer.finished && this.nativePos >= this.nativeLen; }
 
   get loop() { return this.sequencer.loop; }
   set loop(v) { this.sequencer.loop = !!v; }
@@ -4640,8 +5041,12 @@ class IyagiMusic {
   /** Chip-wide switches, as the CF_* bits. */
   get chipFlags() { return this.chip.chipFlags; }
 
-  /** Bank patch names by voice, and a counter that moves when one changes. */
+  /**
+   * Bank patch names by voice, sample names by sample voice, and a counter
+   * that moves when either changes.
+   */
   get patchNames() { return this.sequencer.voicePatchName; }
+  get sampleNames() { return this.sequencer.sampleName ?? []; }
   get patchEpoch() { return this.sequencer.patchEpoch; }
 
   /** A buffer the right size for `readMeters`. */
@@ -4661,6 +5066,41 @@ class IyagiMusic {
     // Only the rows this chip has: past them the driver has no voice to read a
     // volume off, and writing `undefined` into a Float32Array writes NaN.
     for (let v = 0; v < this.chip.voiceRows; v++) out[v * METER_STRIDE + M_VOLUME] = volume[v];
+    return out;
+  }
+
+  /** A buffer the right size for `readSampleMeters`: one row per sample voice. */
+  sampleMeterBuffer() { return new Float32Array(Math.max(1, this.sampleVoiceCount) * METER_STRIDE); }
+
+  /**
+   * One meter row per sample voice, in the chip's row layout, so a display
+   * can draw them with the code it draws voices with. They are kept out of
+   * `readMeters` because the chip's rows promise the drums are their last
+   * five, and sample voices come after the drums. Peak is on the chip's
+   * scale; key-on is lit while the sample plays; the note is the note struck,
+   * whatever rate that meant; the envelope state is sustain while it plays
+   * and off otherwise, since a sample has no envelope. Reading clears the
+   * peaks, as `readMeters` does.
+   *
+   * @param {Float32Array} out from `sampleMeterBuffer()`
+   * @returns {Float32Array} the same buffer
+   */
+  readSampleMeters(out) {
+    const pcm = this.sequencer.pcm;
+    if (!pcm) return out;
+    for (let v = 0; v < pcm.voiceCount; v++) {
+      const o = v * METER_STRIDE;
+      const voice = pcm.voices[v];
+      const on = !!voice.playing;
+      out[o + M_PEAK] = pcm.takePeak(v);
+      out[o + M_MOD_DB] = -1;
+      out[o + M_NOTE] = on ? this.sequencer.sampleNote[v] : -1;
+      out[o + M_KEY_ON] = on ? 1 : 0;
+      out[o + M_STATE] = on ? EG_SUSTAIN : EG_OFF;
+      out[o + M_VOLUME] = voice.volume;
+      out[o + M_TIMBRE] = 0;
+      out[o + M_PAN] = voice.pan;
+    }
     return out;
   }
 
@@ -4701,7 +5141,7 @@ class IyagiMusic {
   /** Take the next chip sample into `prevL`/`prevR`, refilling if need be. */
   #advance() {
     if (this.nativePos >= this.nativeLen) {
-      if (this.sequencer.ended) { this.prevL = this.prevR = 0; return; }
+      if (this.sequencer.finished) { this.prevL = this.prevR = 0; return; }
       this.nativeLen = this.stereo
         ? this.sequencer.renderStereo(this.nativeL, this.nativeR, 0, this.nativeL.length)
         : this.sequencer.render(this.nativeL, 0, this.nativeL.length);
@@ -4870,6 +5310,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
     // One meter buffer for the life of the processor: postMessage copies it,
     // so it can be refilled every frame without allocating on the audio thread.
     this.meter = IyagiMusic.meterBuffer();
+    /** @type {Float32Array|null} sized per song: see `load` */
+    this.sampleMeter = null;
     this.patchEpoch = -1;
     this.port.onmessage = (e) => this.#command(e.data);
   }
@@ -4887,6 +5329,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
             chip: msg.chip,
             implayStereo: !!msg.implayStereo,
             tone: msg.tone,
+            sampleReference: msg.sampleReference,
+            sampleCut: msg.sampleCut,
           });
           // The page's slider is a fraction of the chip's headroom, not an
           // absolute scale -- an OPL3 song has twenty voices to fit into the
@@ -4900,6 +5344,7 @@ class IyagiProcessor extends AudioWorkletProcessor {
           if (msg.transpose !== undefined) this.music.transpose = msg.transpose;
           this.playing = false;
           this.patchEpoch = -1;
+          this.sampleMeter = this.music.sampleVoiceCount ? this.music.sampleMeterBuffer() : null;
           this.port.postMessage({
             type: "loaded",
             kind: this.music.kind,
@@ -4914,6 +5359,7 @@ class IyagiProcessor extends AudioWorkletProcessor {
             tempo: this.music.tempo,
             instrumentCount: this.music.instrumentCount,
             percussive: !!this.music.song.percussive,
+            sampleVoices: this.music.sampleVoiceCount,
           });
           // One frame of chip status right away, so a display can lay itself
           // out for the right number of voices before anything is played.
@@ -4937,6 +5383,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
       case "tone": if (this.music) this.music.tone = msg.value; break;
       case "speed": if (this.music) this.music.speed = msg.value; break;
       case "transpose": if (this.music) this.music.transpose = msg.value; break;
+      case "sampleReference": if (this.music) this.music.sampleReference = msg.value; break;
+      case "sampleCut": if (this.music) this.music.sampleCut = !!msg.value; break;
       case "seek":
         if (this.music) { this.music.seek(msg.seconds); this.#report(true); }
         break;
@@ -4961,12 +5409,17 @@ class IyagiProcessor extends AudioWorkletProcessor {
       meter: this.music.readMeters(this.meter),
       voices: this.music.voiceCount,
       chipFlags: this.music.chipFlags,
+      // A version-0.2 SOP's sample voices, in rows of the same shape, after
+      // the chip's (SOP §10). Absent for everything else.
+      sampleVoices: this.music.sampleVoiceCount,
+      samples: this.sampleMeter ? this.music.readSampleMeters(this.sampleMeter) : undefined,
     };
     // Patch names change a handful of times in a whole song; send them only
     // when they have.
     if (this.music.patchEpoch !== this.patchEpoch) {
       this.patchEpoch = this.music.patchEpoch;
       msg.patchNames = this.music.patchNames.slice();
+      msg.sampleNames = this.music.sampleNames.slice();
     }
     this.port.postMessage(msg);
   }

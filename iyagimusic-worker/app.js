@@ -333,7 +333,7 @@ function showSong(msg) {
     els.warn.hidden = true;
   }
 
-  channelShape = { voices: -1, rhythm: false };
+  channelShape = { voices: -1, rhythm: false, samples: 0 };
   els.lyricsUnit.classList.add("song-open");
   setupLyrics(msg.lyrics, msg.tickBeat);
   for (const b of [els.play, els.stop, els.prev, els.next, els.rew, els.ff,
@@ -362,14 +362,19 @@ const formatTime = (s) => {
 // IMPLAY's panel: each voice's number, its instrument, a lamp lit while it
 // holds a note (IMPLAY drew a "P" in two colours), and the key shift it is
 // playing at. The drums show no key: this player leaves them where they are.
+//
+// A version-0.2 SOP's WAV tracks (SOP §10) get a row each after the chip's
+// voices, W1 to W4, named for the sample they last selected and lit while it
+// plays. The key shift does not reach them either.
 
-let channelShape = { voices: -1, rhythm: false };
+let channelShape = { voices: -1, rhythm: false, samples: 0 };
 let channelRows = [];
 let tempoRow = null;
 let patchNames = [];
+let sampleNames = [];
 
-function buildChannels(voices, rhythm) {
-  channelShape = { voices, rhythm };
+function buildChannels(voices, rhythm, samples) {
+  channelShape = { voices, rhythm, samples };
   const drums = rhythm ? voices - RHYTHM_VOICES : voices;
   const DRUM_NAMES = ["베이스 드럼", "스네어", "톰톰", "심벌", "하이햇"];
   channelRows = [];
@@ -387,12 +392,23 @@ function buildChannels(voices, rhythm) {
     nodes.push(row);
     channelRows.push({ row, name, shift, drum, on: false, used: false, drumName: name.textContent });
   }
+  for (let w = 0; w < samples; w++) {
+    const row = document.createElement("div");
+    row.className = "chrow pcm unused";
+    const n = document.createElement("span"); n.className = "n"; n.textContent = `W${w + 1}`;
+    const name = document.createElement("span"); name.className = "name"; name.textContent = "—";
+    const lamp = document.createElement("span"); lamp.className = "lamp";
+    const shift = document.createElement("span"); shift.className = "shift-val"; shift.textContent = "·";
+    row.append(n, name, lamp, shift);
+    nodes.push(row);
+    channelRows.push({ row, name, shift, sample: w, on: false, used: false });
+  }
   tempoRow = document.createElement("div");
   tempoRow.className = "chrow tempo";
   nodes.push(tempoRow);
   // Two columns, filled top to bottom, with the tempo line last: IMPLAY's
   // six-and-five-plus-tempo, and as many rows as a bigger song needs.
-  els.channels.style.setProperty("--rows", String(Math.ceil((voices + 1) / 2)));
+  els.channels.style.setProperty("--rows", String(Math.ceil((voices + samples + 1) / 2)));
   els.channels.replaceChildren(...nodes);
   refreshChannelText();
 }
@@ -400,6 +416,11 @@ function buildChannels(voices, rhythm) {
 function refreshChannelText() {
   for (let v = 0; v < channelRows.length; v++) {
     const c = channelRows[v];
+    if (c.sample !== undefined) {
+      const text = sampleNames[c.sample] || "—";
+      if (c.name.textContent !== text) c.name.textContent = text;
+      continue;
+    }
     if (!c.drum) {
       const text = patchNames[v] || "—";
       if (c.name.textContent !== text) c.name.textContent = text;
@@ -430,13 +451,21 @@ const formatKey = (k) => `${k < 0 ? "−" : k > 0 ? "+" : "±"}${String(Math.abs
 let shownTempo = -1;
 function updateChannels(msg) {
   const rhythm = (msg.chipFlags & CF_RHYTHM) !== 0;
-  if (msg.voices !== channelShape.voices || rhythm !== channelShape.rhythm) {
-    buildChannels(msg.voices, rhythm);
+  const samples = msg.sampleVoices | 0;
+  if (msg.voices !== channelShape.voices || rhythm !== channelShape.rhythm
+    || samples !== channelShape.samples) {
+    buildChannels(msg.voices, rhythm, samples);
   }
-  if (msg.patchNames) { patchNames = msg.patchNames; refreshChannelText(); }
+  if (msg.patchNames) {
+    patchNames = msg.patchNames;
+    sampleNames = msg.sampleNames ?? [];
+    refreshChannelText();
+  }
   for (let v = 0; v < channelRows.length; v++) {
     const c = channelRows[v];
-    const on = msg.meter[v * METER_STRIDE + M_KEY_ON] > 0;
+    const on = c.sample !== undefined
+      ? (msg.samples?.[c.sample * METER_STRIDE + M_KEY_ON] ?? 0) > 0
+      : msg.meter[v * METER_STRIDE + M_KEY_ON] > 0;
     if (on !== c.on) { c.on = on; c.row.classList.toggle("on", on); }
     if (on && !c.used) { c.used = true; c.row.classList.remove("unused"); }
   }

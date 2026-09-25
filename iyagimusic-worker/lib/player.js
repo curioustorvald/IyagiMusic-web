@@ -6,13 +6,17 @@
 import { OPL2, OPL3 } from "./opl/chip.js";
 import {
   NATIVE_RATE, METER_VOICES, METER_STRIDE, M_VOLUME, M_PEAK, CHANNEL_COUNT, RHYTHM_VOICES,
+  M_MOD_DB, M_NOTE, M_KEY_ON, M_STATE, M_TIMBRE, M_PAN, EG_OFF, EG_SUSTAIN,
 } from "./opl/constants.js";
 import { voiceLayout, IMPLAY_PAN } from "./driver.js";
 import {
   parseIms, parseRol, parseBnk, parseIss, parseSop, resolvePatches,
   identify, deltaGcd, resolveIssSpans, ISS_TICK_BEAT,
 } from "./formats.js";
-import { Sequencer, imsSequence, rolSequence, sopSequence, sopTempo } from "./sequencer.js";
+import {
+  Sequencer, imsSequence, rolSequence, sopSequence, sopTempo, sopSampleTracks,
+  SOP_SAMPLE_REFERENCE, SOP_SAMPLE_CUT,
+} from "./sequencer.js";
 
 export { OPL2, OPL3, NATIVE_RATE, parseIms, parseRol, parseBnk, parseIss, identify, deltaGcd };
 export { parseSop, sopPatch } from "./formats.js";
@@ -94,6 +98,8 @@ export class IyagiMusic {
    *   the YM3812's without reloading. Ignored for a `.sop`, and when `chip`
    *   is given as anything but "auto".
    * @param {"raw"|"standard"} [opts.tone]   see `tone`; default "raw"
+   * @param {number|null} [opts.sampleReference] see `sampleReference`
+   * @param {boolean} [opts.sampleCut]       see `sampleCut`
    * @param {number} [opts.gain]             output scale; default by chip, see below
    * @param {(code:number)=>string|null} [opts.userGlyph]
    *   overrides the built-in mapping for Iyagi's own font glyphs
@@ -163,7 +169,13 @@ export class IyagiMusic {
         percussive: this.song.percussive,
         sop: true,                            // SOP §8.1: play it as NOTE.EXE does
         patches: [],
+        // SOP §10.2: a version-0.2 WAV track is a sample voice of its own.
+        sampleVoices: sopSampleTracks(this.song).length,
       });
+      // §10.6: note 24 plays a sample as recorded, and the note's length is
+      // how long it plays.
+      this.sequencer.sampleReference = SOP_SAMPLE_REFERENCE;
+      this.sequencer.sampleCut = SOP_SAMPLE_CUT;
       this.instrumentCount = this.song.instruments.filter(Boolean).length;
     } else {
       this.song = parseRol(opts.song, this.textOptions);
@@ -240,6 +252,8 @@ export class IyagiMusic {
     this.tone = opts.tone ?? "raw";
     /** @type {boolean} */
     this.monoMix = false;
+    if (opts.sampleReference !== undefined) this.sampleReference = opts.sampleReference;
+    if (opts.sampleCut !== undefined) this.sampleCut = opts.sampleCut;
     /** Scratch rows for folding a mirrored chip's meters; see `readMeters`. */
     this.meterScratch = this.mirror ? new Float32Array(METER_VOICES * METER_STRIDE) : null;
   }
@@ -293,6 +307,31 @@ export class IyagiMusic {
   get transpose() { return this.sequencer.transpose; }
   set transpose(v) { this.sequencer.transpose = Math.trunc(v) || 0; }
 
+  /** How many sample voices the song has: four in a version-0.2 SOP, else none. */
+  get sampleVoiceCount() { return this.sequencer.pcm?.voiceCount ?? 0; }
+
+  /**
+   * How a sample voice's note becomes a playback rate: the note at which a
+   * sample plays at its own recorded rate, or null to play every note at that
+   * rate. A version-0.2 SOP starts at 24 (SOP §10.6), which was found by ear
+   * rather than read from anything, so it stays a setting. It reaches the
+   * next sample struck.
+   * @type {number|null}
+   */
+  get sampleReference() { return this.sequencer.sampleReference; }
+  set sampleReference(v) {
+    this.sequencer.sampleReference = v === null || v === undefined ? null : Math.trunc(v);
+  }
+
+  /**
+   * Whether a sample stops when its note ends (true) or plays to its own end
+   * (false). A version-0.2 SOP starts with true (SOP §10.6), a judgement
+   * rather than a finding, so it stays a setting.
+   * @type {boolean}
+   */
+  get sampleCut() { return this.sequencer.sampleCut; }
+  set sampleCut(v) { this.sequencer.sampleCut = !!v; }
+
   /** The song's tempo right now, in bpm, before `speed`. */
   get tempo() { return this.sequencer.tempo; }
 
@@ -329,8 +368,11 @@ export class IyagiMusic {
   get volume() { return this.gain / this.headroom; }
   set volume(v) { this.gain = this.headroom * (v > 0 ? v : 0); }
 
-  /** Whether the song has run past its end marker. */
-  get ended() { return this.sequencer.ended && this.nativePos >= this.nativeLen; }
+  /**
+   * Whether the song has run past its end marker -- and past the end of any
+   * sample still playing there, which is let ring out (`Sequencer.finished`).
+   */
+  get ended() { return this.sequencer.finished && this.nativePos >= this.nativeLen; }
 
   get loop() { return this.sequencer.loop; }
   set loop(v) { this.sequencer.loop = !!v; }
@@ -369,8 +411,12 @@ export class IyagiMusic {
   /** Chip-wide switches, as the CF_* bits. */
   get chipFlags() { return this.chip.chipFlags; }
 
-  /** Bank patch names by voice, and a counter that moves when one changes. */
+  /**
+   * Bank patch names by voice, sample names by sample voice, and a counter
+   * that moves when either changes.
+   */
   get patchNames() { return this.sequencer.voicePatchName; }
+  get sampleNames() { return this.sequencer.sampleName ?? []; }
   get patchEpoch() { return this.sequencer.patchEpoch; }
 
   /** A buffer the right size for `readMeters`. */
@@ -390,6 +436,41 @@ export class IyagiMusic {
     // Only the rows this chip has: past them the driver has no voice to read a
     // volume off, and writing `undefined` into a Float32Array writes NaN.
     for (let v = 0; v < this.chip.voiceRows; v++) out[v * METER_STRIDE + M_VOLUME] = volume[v];
+    return out;
+  }
+
+  /** A buffer the right size for `readSampleMeters`: one row per sample voice. */
+  sampleMeterBuffer() { return new Float32Array(Math.max(1, this.sampleVoiceCount) * METER_STRIDE); }
+
+  /**
+   * One meter row per sample voice, in the chip's row layout, so a display
+   * can draw them with the code it draws voices with. They are kept out of
+   * `readMeters` because the chip's rows promise the drums are their last
+   * five, and sample voices come after the drums. Peak is on the chip's
+   * scale; key-on is lit while the sample plays; the note is the note struck,
+   * whatever rate that meant; the envelope state is sustain while it plays
+   * and off otherwise, since a sample has no envelope. Reading clears the
+   * peaks, as `readMeters` does.
+   *
+   * @param {Float32Array} out from `sampleMeterBuffer()`
+   * @returns {Float32Array} the same buffer
+   */
+  readSampleMeters(out) {
+    const pcm = this.sequencer.pcm;
+    if (!pcm) return out;
+    for (let v = 0; v < pcm.voiceCount; v++) {
+      const o = v * METER_STRIDE;
+      const voice = pcm.voices[v];
+      const on = !!voice.playing;
+      out[o + M_PEAK] = pcm.takePeak(v);
+      out[o + M_MOD_DB] = -1;
+      out[o + M_NOTE] = on ? this.sequencer.sampleNote[v] : -1;
+      out[o + M_KEY_ON] = on ? 1 : 0;
+      out[o + M_STATE] = on ? EG_SUSTAIN : EG_OFF;
+      out[o + M_VOLUME] = voice.volume;
+      out[o + M_TIMBRE] = 0;
+      out[o + M_PAN] = voice.pan;
+    }
     return out;
   }
 
@@ -430,7 +511,7 @@ export class IyagiMusic {
   /** Take the next chip sample into `prevL`/`prevR`, refilling if need be. */
   #advance() {
     if (this.nativePos >= this.nativeLen) {
-      if (this.sequencer.ended) { this.prevL = this.prevR = 0; return; }
+      if (this.sequencer.finished) { this.prevL = this.prevR = 0; return; }
       this.nativeLen = this.stereo
         ? this.sequencer.renderStereo(this.nativeL, this.nativeR, 0, this.nativeL.length)
         : this.sequencer.render(this.nativeL, 0, this.nativeL.length);

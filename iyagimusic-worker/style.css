@@ -217,6 +217,9 @@ button:disabled { opacity: .38; cursor: default; }
 /* IMPLAY lists its instruments in lower case, whatever case the bank uses. */
 .chrow .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--accent); text-transform: lowercase; }
 .chrow.drum .name { color: var(--accent-2); }
+/* A sample voice (SOP 0.2's WAV tracks): neither the chip's melody nor its drums. */
+.chrow.pcm .name { color: var(--hot); }
+.chrow.pcm .shift-val { color: var(--recede); }
 .chrow.unused .name { color: var(--recede); }
 .chrow .shift-val { text-align: right; color: var(--ink-2); }
 .chrow.drum .shift-val { color: var(--recede); }
@@ -231,6 +234,7 @@ button:disabled { opacity: .38; cursor: default; }
 }
 .chrow.on .lamp { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .chrow.drum.on .lamp { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+.chrow.pcm.on .lamp { background: var(--hot); box-shadow: 0 0 6px var(--hot); }
 .chrow.tempo {
   grid-template-columns: minmax(0, 1fr) auto;
   color: var(--ink-2);

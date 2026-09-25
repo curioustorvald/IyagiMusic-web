@@ -19,6 +19,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
     // One meter buffer for the life of the processor: postMessage copies it,
     // so it can be refilled every frame without allocating on the audio thread.
     this.meter = IyagiMusic.meterBuffer();
+    /** @type {Float32Array|null} sized per song: see `load` */
+    this.sampleMeter = null;
     this.patchEpoch = -1;
     this.port.onmessage = (e) => this.#command(e.data);
   }
@@ -36,6 +38,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
             chip: msg.chip,
             implayStereo: !!msg.implayStereo,
             tone: msg.tone,
+            sampleReference: msg.sampleReference,
+            sampleCut: msg.sampleCut,
           });
           // The page's slider is a fraction of the chip's headroom, not an
           // absolute scale -- an OPL3 song has twenty voices to fit into the
@@ -49,6 +53,7 @@ class IyagiProcessor extends AudioWorkletProcessor {
           if (msg.transpose !== undefined) this.music.transpose = msg.transpose;
           this.playing = false;
           this.patchEpoch = -1;
+          this.sampleMeter = this.music.sampleVoiceCount ? this.music.sampleMeterBuffer() : null;
           this.port.postMessage({
             type: "loaded",
             kind: this.music.kind,
@@ -63,6 +68,7 @@ class IyagiProcessor extends AudioWorkletProcessor {
             tempo: this.music.tempo,
             instrumentCount: this.music.instrumentCount,
             percussive: !!this.music.song.percussive,
+            sampleVoices: this.music.sampleVoiceCount,
           });
           // One frame of chip status right away, so a display can lay itself
           // out for the right number of voices before anything is played.
@@ -86,6 +92,8 @@ class IyagiProcessor extends AudioWorkletProcessor {
       case "tone": if (this.music) this.music.tone = msg.value; break;
       case "speed": if (this.music) this.music.speed = msg.value; break;
       case "transpose": if (this.music) this.music.transpose = msg.value; break;
+      case "sampleReference": if (this.music) this.music.sampleReference = msg.value; break;
+      case "sampleCut": if (this.music) this.music.sampleCut = !!msg.value; break;
       case "seek":
         if (this.music) { this.music.seek(msg.seconds); this.#report(true); }
         break;
@@ -110,12 +118,17 @@ class IyagiProcessor extends AudioWorkletProcessor {
       meter: this.music.readMeters(this.meter),
       voices: this.music.voiceCount,
       chipFlags: this.music.chipFlags,
+      // A version-0.2 SOP's sample voices, in rows of the same shape, after
+      // the chip's (SOP §10). Absent for everything else.
+      sampleVoices: this.music.sampleVoiceCount,
+      samples: this.sampleMeter ? this.music.readSampleMeters(this.sampleMeter) : undefined,
     };
     // Patch names change a handful of times in a whole song; send them only
     // when they have.
     if (this.music.patchEpoch !== this.patchEpoch) {
       this.patchEpoch = this.music.patchEpoch;
       msg.patchNames = this.music.patchNames.slice();
+      msg.sampleNames = this.music.sampleNames.slice();
     }
     this.port.postMessage(msg);
   }
