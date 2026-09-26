@@ -3507,9 +3507,10 @@ class AdlibDriver {
 // resampled with it on the way out. Like `opl/chip.js` this is pure
 // computation: no DOM, no Web Audio, no `console`.
 //
-// It knows nothing about notes. The caller says what rate a sample plays at,
-// because how a note becomes a rate is a property of the format -- and for
-// SOP 0.2, not yet a known one (SOP §10.6).
+// It knows nothing about notes, volumes or pan positions. The caller says what
+// rate a sample plays at and how loud it is on each side, as plain numbers,
+// because how a note, a volume or a pan becomes those is the format's -- for
+// SOP 0.2, the rules of the game that played it (SOP §10.6).
 
 
 /**
@@ -3519,20 +3520,6 @@ class AdlibDriver {
  * the chip's voices -- is not thrown by it.
  */
 const PCM_SCALE = 0.5;
-
-/**
- * Volume 0..127 as a gain, by the law the driver uses on a carrier at full
- * level: `63 − ((63 × volume + 64) >> 7)` steps of 0.75 dB (SOP §8). A sample
- * at volume 96 is then 12 dB down, exactly as an FM voice beside it is, which
- * matters more than any absolute choice would: the only thing a listener can
- * judge is the balance.
- * @param {number} volume
- */
-function pcmVolumeGain(volume) {
-  const v = Math.max(0, Math.min(127, volume | 0));
-  const steps = 63 - ((63 * v + 64) >> 7);
-  return v === 0 ? 0 : 10 ** (-0.75 * steps / 20);
-}
 
 /**
  * A sample, as the mixer takes it: signed 8-bit mono at `rate`. The shape a
@@ -3552,9 +3539,10 @@ class PcmVoice {
     this.playing = null;
     this.pos = 0;
     this.step = 0;
-    this.volume = 96;
-    this.gain = pcmVolumeGain(96);
-    this.pan = PAN_CENTRE;
+    /** Linear gains, 0..1, on each side of a stereo bus; `left` alone on a mono one. */
+    this.left = 1;
+    this.right = 1;
+    this.gain = 1;
     /** Loudest |output| since the last `takePeak`, on the chip's bus scale. */
     this.peak = 0;
   }
@@ -3577,15 +3565,20 @@ class PcmMixer {
   /** @param {number} voice @param {PcmSample|null} sample */
   setSample(voice, sample) { this.voices[voice].sample = sample; }
 
-  /** @param {number} voice @param {number} volume 0..127 */
-  setVolume(voice, volume) {
-    const v = this.voices[voice];
-    v.volume = volume;
-    v.gain = pcmVolumeGain(volume);
-  }
+  /** @param {number} voice @param {number} gain linear, 1 for as recorded */
+  setGain(voice, gain) { this.voices[voice].gain = gain; }
 
-  /** @param {number} voice @param {number} pan one of the PAN_* values */
-  setPan(voice, pan) { this.voices[voice].pan = pan; }
+  /**
+   * How much of the voice each side of a stereo bus gets, linear 0..1. A mono
+   * bus takes the voice at its gain whatever these say, as a mono chip has no
+   * pan to honour.
+   * @param {number} voice @param {number} left @param {number} right
+   */
+  setPan(voice, left, right) {
+    const v = this.voices[voice];
+    v.left = left;
+    v.right = right;
+  }
 
   /**
    * Start the voice's sample from the top, at `rate` Hz. A voice already
@@ -3632,8 +3625,7 @@ class PcmMixer {
    *
    * On a stereo bus a centred voice goes into both sides at full level, as
    * the OPL3's own centred channels do, so a mono fold of the two is the
-   * voice exactly; PAN_NONE, both switches off, is silence there as on the
-   * chip.
+   * voice exactly.
    *
    * @param {Float32Array} left @param {Float32Array|null} right
    * @param {number} offset @param {number} count
@@ -3643,9 +3635,8 @@ class PcmMixer {
       const s = v.playing;
       if (!s) continue;
       const g = (v.gain * PCM_SCALE) / 128;
-      // A mono bus has no pan to honour, as a mono chip has none.
-      const toL = right ? (v.pan === PAN_LEFT || v.pan === PAN_CENTRE) : true;
-      const toR = !!right && (v.pan === PAN_RIGHT || v.pan === PAN_CENTRE);
+      const gl = right ? v.left : 1;
+      const gr = right ? v.right : 0;
       const last = s.length - 1;
       let pos = v.pos;
       let peak = v.peak;
@@ -3654,10 +3645,9 @@ class PcmMixer {
         if (i >= last) { v.playing = null; break; }
         const f = pos - i;
         const x = (s[i] + (s[i + 1] - s[i]) * f) * g;
-        if (toL) left[offset + n] += x;
-        if (toR) right[offset + n] += x;
-        // Heard or not: a voice panned to nothing still moves its meter, as a
-        // chip channel with both switches off does.
+        left[offset + n] += x * gl;
+        if (gr) right[offset + n] += x * gr;
+        // Before panning, as the chip's meters read a channel's output.
         const a = x < 0 ? -x : x;
         if (a > peak) peak = a;
         pos += v.step;
@@ -3712,6 +3702,9 @@ const NOTE_ON = 0, NOTE_OFF = 1, VOLUME = 2, PATCH = 3, BEND = 4,
  * @property {import("./pcm.js").PcmSample|null} [sample] a sample voice's PATCH
  * @property {string} [name] the sample's name, for a display
  * @property {number} [cents] a sample voice's BEND, from its note's own pitch
+ * @property {number} [gain] a sample voice's VOLUME or NOTE_ON, linear
+ * @property {number} [left] a sample voice's PAN: gain on the left, linear
+ * @property {number} [right] and on the right
  */
 
 /**
@@ -3818,6 +3811,8 @@ class Sequencer {
     /** A sample voice's last note and bend, so a bend can retune it. */
     this.sampleNote = new Array(this.pcm?.voiceCount ?? 0).fill(-1);
     this.sampleCents = new Array(this.pcm?.voiceCount ?? 0).fill(0);
+    /** A sample voice's volume as the song set it, 0..127, for a display. */
+    this.sampleVolume = new Array(this.pcm?.voiceCount ?? 0).fill(0);
     /**
      * What each sample voice is set to play, by name, for a display: the
      * sample voices' `voicePatchName`. Changes move `patchEpoch` too.
@@ -3954,22 +3949,31 @@ class Sequencer {
     if (!p || ev.voice >= p.voiceCount) return;
     const v = ev.voice;
     switch (ev.type) {
-      case NOTE_ON:
-        if (ev.volume !== undefined) p.setVolume(v, ev.volume);
+      case NOTE_ON: {
+        if (ev.gain !== undefined) p.setGain(v, ev.gain);
+        if (ev.volume !== undefined) this.sampleVolume[v] = ev.volume;
         this.sampleNote[v] = ev.note;
-        p.trigger(v, this.#sampleRate(v, ev.note, this.sampleCents[v]));
+        const rate = this.#sampleRate(v, ev.note, this.sampleCents[v]);
+        // A slur moves the pitch of whatever is playing and strikes nothing,
+        // even if what was playing has already run out.
+        if (ev.legato) p.retune(v, rate);
+        else p.trigger(v, rate);
         break;
+      }
       case NOTE_OFF:
         if (this.sampleCut) p.stop(v);
         break;
-      case VOLUME: p.setVolume(v, ev.volume); break;
+      case VOLUME:
+        p.setGain(v, ev.gain ?? ev.volume / 127);
+        this.sampleVolume[v] = ev.volume;
+        break;
       case PATCH: {
         p.setSample(v, ev.sample ?? null);
         const name = ev.name ?? "";
         if (this.sampleName[v] !== name) { this.sampleName[v] = name; this.patchEpoch++; }
         break;
       }
-      case PAN: p.setPan(v, ev.pan); break;
+      case PAN: p.setPan(v, ev.left ?? 1, ev.right ?? 1); break;
       case BEND:
         this.sampleCents[v] = ev.cents ?? 0;
         if (this.sampleNote[v] >= 0) p.retune(v, this.#sampleRate(v, this.sampleNote[v], this.sampleCents[v]));
@@ -4256,13 +4260,14 @@ function opl2Layout(song) {
  * @returns {{pan:number, garble:number}}
  */
 function sopPan(value, centred) {
-  // §10.4: version 0.2 pans about a centre of 64. The files never leave 54..74
-  // and do not say which end is left, so this takes MIDI's reading, 0 left and
-  // 127 right, and gives each of the OPL3's three switch settings a third of
-  // the range. Every pan the four known files hold comes out centred.
+  // §10.4 (KMAN.EXE): version 0.2 pans about a centre of 64, and the game's
+  // player turns it into the same three switch settings as 0, 1 and 2 --
+  // below 64 is 0's, 64 is 1's, above 64 is 2's. It reads a version-0.1 pan
+  // by adding 63, which lands 0, 1 and 2 on exactly those. So 54 is as hard
+  // to one side as 0 is.
   if (centred) {
-    if (value < 43) return { pan: PAN_LEFT, garble: 0 };
-    if (value > 84) return { pan: PAN_RIGHT, garble: 0 };
+    if (value < 64) return { pan: PAN_RIGHT, garble: 0 };
+    if (value > 64) return { pan: PAN_LEFT, garble: 0 };
     return { pan: PAN_CENTRE, garble: 0 };
   }
   if (value === 0) return { pan: PAN_RIGHT, garble: 0 };
@@ -4295,18 +4300,19 @@ function sopTempo(bpm, tickBeat) {
 }
 
 /**
- * SOP §10.6: the note at which a version-0.2 WAV track plays a sample at its
- * recorded rate. The files cannot say; this was chosen by ear, against
- * recordings of the game the known files come from. It is a C, where a
- * tracker plays a sample as recorded.
+ * SOP §10.6 (KMAN.EXE): the note at which a version-0.2 WAV track plays a
+ * sample at its recorded rate. The game's player looks the note up as period
+ * `table[note − 12]`, and its mixer plays a sample at `rate × 1712 ÷ period`;
+ * 1712 is the table's entry for note 24. It was chosen by ear first, against
+ * recordings of the game, and the code agreed.
  */
 const SOP_SAMPLE_REFERENCE = 24;
 
 /**
- * SOP §10.6: a version-0.2 sample stops when its note ends. Nothing could
- * confirm it -- the one note it matters for is the last hit of the game's
- * ending, and the game's cutscene ends before the music does -- so this is a
- * judgement: it is the reading under which a note's length means anything.
+ * SOP §10.6 (KMAN.EXE): a version-0.2 sample stops when its note ends. The
+ * game's player schedules a note-off at the note's end like any other, and a
+ * WAV track's note-off stops the voice. It was a judgement first -- the
+ * game's own cutscene ends before the music does -- and the code agreed.
  */
 const SOP_SAMPLE_CUT = true;
 
@@ -4320,6 +4326,60 @@ function sopSampleTracks(song) {
   const out = [];
   song.tracks.forEach((t, i) => { if (t.mode === 3) out.push(i); });
   return out;
+}
+
+/**
+ * SOP §10.8: the tempo, in bpm, that 개미맨's player plays a SOP tempo of
+ * `bpm` at. It counts the PIT's clock directly -- 60 × 1193182 ÷ tickBeat ÷
+ * bpm counts to the tick, in integers, rather than Note's 4 × bpm interrupts
+ * -- so the average is the tempo as written. A tick shorter than the game's
+ * own timer, about 35 Hz, is held to one timer period, and 0 means 120.
+ *
+ * @param {number} bpm @param {number} tickBeat
+ * @returns {number}
+ */
+function sopGameTempo(bpm, tickBeat) {
+  const b = bpm || 120, tb = tickBeat || 4;
+  const counts = Math.max(Math.floor(Math.floor((60 * PIT_HZ) / tb) / b), GAME_TIMER_COUNTS);
+  return (60 * PIT_HZ) / (counts * tb);
+}
+/** The game's timer divisor: its interrupt, and so its shortest tick. */
+const GAME_TIMER_COUNTS = 0x851e;
+
+/**
+ * SOP §10.6 (KMAN.EXE): a WAV track's volume 0..127 as the game's mixer takes
+ * it -- `(volume >> 1) + 1` of 64, linear. 0 is not silence; it is 1/64.
+ * @param {number} volume
+ */
+function sopSampleGain(volume) {
+  return ((Math.max(0, Math.min(127, volume | 0)) >> 1) + 1) / 64;
+}
+
+/**
+ * SOP §10.6 (KMAN.EXE): a WAV track's pan as gains on each side. The game's
+ * mixer takes `128 − pan`, gives the nearer side the voice's whole level and
+ * the other a linear share of it; below 64 is louder on the LEFT, the opposite
+ * of the FM tracks' switches in the same player (§10.4). Values past 127 are
+ * held there: the game's own arithmetic wraps on them.
+ * @param {number} value
+ * @returns {{left:number, right:number}}
+ */
+function sopSamplePan(value) {
+  const v = Math.max(0, Math.min(127, value | 0));
+  return { left: Math.min(1, (128 - v) / 64), right: Math.min(1, v / 64) };
+}
+
+/**
+ * SOP §10.6 (KMAN.EXE): a WAV track's pitch, 0..200 about 100, as the game
+ * bends a sample: `pitch >> 3` picks one of twelve rows of its period table,
+ * a twelfth of a semitone apart, and a semitone down, none or up. So a bend
+ * moves in steps of 8⅓ cents and stops at a semitone either way.
+ * @param {number} pitch
+ * @returns {number} cents
+ */
+function sopSampleCents(pitch) {
+  const q = Math.max(0, Math.min(200, pitch | 0)) >> 3;
+  return ((Math.min(q, 24) - 12) * 100) / 12;
 }
 
 /** SOP §4.2: Note's volume for a track that has not had a volume event yet. */
@@ -4491,7 +4551,8 @@ function sopSequence(song, layout) {
     for (let t = 0; t < nTracks; t++) {
       if (!touched[t]) continue;
       if (sampleVoiceOf[t] >= 0) {
-        out.push({ tick, type: VOLUME, pcm: true, voice: sampleVoiceOf[t], volume: volumeOf(t), order: 2 });
+        const volume = volumeOf(t);
+        out.push({ tick, type: VOLUME, pcm: true, voice: sampleVoiceOf[t], volume, gain: sopSampleGain(volume), order: 2 });
         continue;
       }
       const voice = fixedVoiceOf(t);
@@ -4508,30 +4569,39 @@ function sopSequence(song, layout) {
   const sampleEvent = (ev, t, voice) => {
     const at = { tick: ev.tick, pcm: true, voice };
     switch (ev.code) {
-      case 6: {                                              // a sample, or nothing
-        // Every WAV track in the known files selects FM slot 0 at tick 0
-        // before any sample. Nothing can play that here, so it is passed over
-        // and the voice keeps what it had -- as an empty slot does in Note.
+      case 6: {                                              // a sample, or none
+        // §10.6 (KMAN.EXE): the game only remembers the slot, and a note
+        // starts a sample only if the slot holds one. So a slot that is not a
+        // sample -- every known WAV track selects FM slot 0 at tick 0 -- means
+        // the next note is silent, not that the last sample stays.
         const inst = song.instruments[ev.value];
-        if (inst?.pcm) out.push({ ...at, type: PATCH, sample: inst.pcm, name: inst.shortName, order: 1 });
+        const sample = inst?.pcm ?? null;
+        out.push({ ...at, type: PATCH, sample, name: sample ? inst.shortName : "", order: 1 });
         break;
       }
-      case 4:
+      case 4: {
         trackVolume[t] = ev.value;
-        out.push({ ...at, type: VOLUME, volume: volumeOf(t), order: 2 });
+        const volume = volumeOf(t);
+        out.push({ ...at, type: VOLUME, volume, gain: sopSampleGain(volume), order: 2 });
         break;
-      case 5:                                                // 0..200 about 100: cents
-        out.push({ ...at, type: BEND, cents: ev.value - 100, order: 2 });
+      }
+      case 5:
+        out.push({ ...at, type: BEND, cents: sopSampleCents(ev.value), order: 2 });
         break;
       case 7:
-        out.push({ ...at, type: PAN, pan: sopPan(ev.value, centredPan).pan, order: 2 });
+        out.push({ ...at, type: PAN, ...sopSamplePan(ev.value), order: 2 });
         break;
       case 2: {
-        // A note struck while the last one's sample plays restarts it; the
-        // last one's note-off must not then stop the new one.
+        // §10.6 (KMAN.EXE): a note struck while the last one still sounds
+        // slurs, as on an FM track: the sample is not restarted, its pitch
+        // moves, and the new note's end is the one that stops it. A note that
+        // starts where the last one ends is struck again, because the note-off
+        // comes first.
         const pending = sampleOff[voice];
-        if (pending && pending.tick > ev.tick) pending.dead = true;
-        out.push({ ...at, type: NOTE_ON, note: ev.value, volume: volumeOf(t), order: 4 });
+        const legato = !!pending && !pending.dead && pending.tick > ev.tick;
+        if (legato) pending.dead = true;
+        const volume = volumeOf(t);
+        out.push({ ...at, type: NOTE_ON, note: ev.value, volume, gain: sopSampleGain(volume), legato, order: 4 });
         const off = { tick: ev.tick + Math.max(1, ev.length ?? 1), type: NOTE_OFF, pcm: true, voice, order: 3 };
         out.push(off);
         sampleOff[voice] = off;
@@ -4547,7 +4617,9 @@ function sopSequence(song, layout) {
     lastTick = ev.tick;
     if (track < 0) {
       if (ev.code === 3) {                                   // §5: tempo, in bpm
-        out.push({ tick: ev.tick, type: TEMPO, tempo: sopTempo(ev.value, song.tickBeat), order: 0 });
+        // §10.8: a version-0.2 song is played by the game's clock, not Note's.
+        const tempo = centredPan ? sopGameTempo(ev.value, song.tickBeat) : sopTempo(ev.value, song.tickBeat);
+        out.push({ tick: ev.tick, type: TEMPO, tempo, order: 0 });
       } else if (ev.code === 8) {                            // §5: global volume
         setGlobalVolume(ev.tick, ev.value);
       }
@@ -4794,8 +4866,10 @@ class IyagiMusic {
           voiceLayout(this.chipKind === "opl3", this.song.percussive)),
         tickBeat: this.song.tickBeat,
         // SOP §1, §5: Note starts every song at 120 and never reads
-        // basicTempo; the timer makes that 120.04.
-        tempo: sopTempo(120, this.song.tickBeat),
+        // basicTempo; the timer makes that 120.04. §10.8: a version-0.2 song
+        // is the game's, whose clock makes 120 exactly 120.
+        tempo: this.song.version[1] >= 2 || this.song.version[0] > 0
+          ? sopGameTempo(120, this.song.tickBeat) : sopTempo(120, this.song.tickBeat),
         percussive: this.song.percussive,
         sop: true,                            // SOP §8.1: play it as NOTE.EXE does
         patches: [],
@@ -4943,9 +5017,9 @@ class IyagiMusic {
   /**
    * How a sample voice's note becomes a playback rate: the note at which a
    * sample plays at its own recorded rate, or null to play every note at that
-   * rate. A version-0.2 SOP starts at 24 (SOP §10.6), which was found by ear
-   * rather than read from anything, so it stays a setting. It reaches the
-   * next sample struck.
+   * rate. A version-0.2 SOP starts at 24, the game's own (SOP §10.6); it
+   * stays a setting for other formats and for listening. It reaches the next
+   * sample struck.
    * @type {number|null}
    */
   get sampleReference() { return this.sequencer.sampleReference; }
@@ -4955,8 +5029,8 @@ class IyagiMusic {
 
   /**
    * Whether a sample stops when its note ends (true) or plays to its own end
-   * (false). A version-0.2 SOP starts with true (SOP §10.6), a judgement
-   * rather than a finding, so it stays a setting.
+   * (false). A version-0.2 SOP starts with true, as the game plays it
+   * (SOP §10.6).
    * @type {boolean}
    */
   get sampleCut() { return this.sequencer.sampleCut; }
@@ -5097,9 +5171,11 @@ class IyagiMusic {
       out[o + M_NOTE] = on ? this.sequencer.sampleNote[v] : -1;
       out[o + M_KEY_ON] = on ? 1 : 0;
       out[o + M_STATE] = on ? EG_SUSTAIN : EG_OFF;
-      out[o + M_VOLUME] = voice.volume;
+      out[o + M_VOLUME] = this.sequencer.sampleVolume[v];
       out[o + M_TIMBRE] = 0;
-      out[o + M_PAN] = voice.pan;
+      // The chip's PAN_* values say which switches are on; a sample's pan is
+      // a balance, so this says which sides it reaches at all.
+      out[o + M_PAN] = (voice.left > 0 ? PAN_LEFT : 0) | (voice.right > 0 ? PAN_RIGHT : 0);
     }
     return out;
   }
