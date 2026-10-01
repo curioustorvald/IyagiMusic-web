@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>IyagiMusic.js — 이야기 뮤직 사운드 플레이어</title>
-<meta name="description" content="1990년대 PC통신 음악 파일(.ims / .rol / .sop)을 웹 브라우저에서 그대로 재생합니다.">
+<meta name="description" content="1990년대 PC통신 음악 파일(.ims / .rol / .sop)과 이야기 뮤직 아카이브의 .imac 파일을 웹 브라우저에서 그대로 재생합니다.">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -20,7 +20,7 @@
       <h1>IyagiMusic<span>.js</span></h1>
       <p>이야기 뮤직 플레이어</p>
       <button type="button" id="open" class="open">열기</button>
-      <input type="file" id="files" multiple accept=".ims,.rol,.sop,.bnk,.iss,.IMS,.ROL,.SOP,.BNK,.ISS" hidden>
+      <input type="file" id="files" multiple accept=".ims,.rol,.sop,.bnk,.iss,.imac,.IMS,.ROL,.SOP,.BNK,.ISS,.IMAC" hidden>
     </div>
 
     <div class="meter-well">
@@ -31,7 +31,7 @@
     <div class="readout">
       <div class="lcd lcd-title"><span id="title">파일을 이곳에 끌어다 놓으세요</span></div>
       <div class="lcd-row">
-        <div class="lcd lcd-file"><span id="file">.ims · .rol · .sop</span><span id="index" class="lcd-dim"></span></div>
+        <div class="lcd lcd-file"><span id="file">.ims · .rol · .sop · .imac</span><span id="index" class="lcd-dim"></span></div>
         <div class="lcd lcd-badge" id="stereo-badge" title="출력">—</div>
       </div>
       <div class="lcd-row">
@@ -182,6 +182,12 @@
       그래서 이 페이지는 <code>STANDARD.BNK</code>를 함께 담아 두고, 뱅크를 따로
       놓지 않으면 그것을 씁니다. 곡 전용 뱅크를 함께 놓으면 그쪽이 우선하고,
       거기에 없는 음색만 내장 뱅크에서 찾습니다.
+    </p>
+    <p class="note">
+      <b>아카이브 파일에 대하여.</b> 이야기 뮤직 아카이브에서 받는 <code>.imac</code>
+      파일에는 한 곡을 두고 그 시절 돌던 판본이 모두 들어 있습니다. 기본판과
+      변형마다 곡과 음색 뱅크, 가사가 함께 묶여 있어서, 파일 하나만 놓으면 판본마다
+      제 뱅크와 가사를 짝지어 차례로 재생합니다.
     </p>
     <p class="keys">
       <b>글쇠</b>

@@ -9,6 +9,7 @@
 import { identify, resolveIssSpans, METER_STRIDE, M_KEY_ON, RHYTHM_VOICES, CF_RHYTHM }
   from "./lib/player.js";
 import { createVisualiser } from "./visualiser.js";
+import { isImac, readImac, imacFileName } from "./imac.js";
 
 const $ = (id) => document.getElementById(id);
 const els = {
@@ -208,11 +209,20 @@ async function bundledBankBytes() {
  * shares no song's name is a general one, and backs up every song's own; the
  * bundled bank backs up both. Lyrics that share no name go to the song only
  * when there is exactly one of each -- anything else would be a guess.
+ *
+ * An IMAC from the archive is paired already: each of its variants brings the
+ * bank and lyrics it travelled with (`imacItems`), so nothing about it is a
+ * guess. Its songs follow the loose ones, IMAC by IMAC, variant by variant,
+ * and a general bank backs them up as it does every other song.
  */
 async function intake(fileList) {
-  const songs = [], banks = [], lyrics = [];
+  const songs = [], banks = [], lyrics = [], archived = [];
   for (const file of fileList) {
     const bytes = new Uint8Array(await file.arrayBuffer());
+    if (isImac(bytes)) {
+      archived.push(...imacItems(bytes, file.name));
+      continue;
+    }
     const kind = identify(bytes);
     const item = { bytes, name: file.name, stem: stemOf(file.name), kind };
     if (kind === "ims" || kind === "rol" || kind === "sop") songs.push(item);
@@ -222,20 +232,60 @@ async function intake(fileList) {
   songs.sort((a, b) => a.name.localeCompare(b.name, "ko"));
   const songStems = new Set(songs.map((s) => s.stem));
   const general = banks.filter((b) => !songStems.has(b.stem));
-  return songs.map((s) => {
-    const own = banks.find((b) => b.stem === s.stem);
+  const withBanks = (s, own) => {
     const bank = NEEDS_BANK[s.kind] ? (own ?? general[0] ?? null) : null;
     const spare = NEEDS_BANK[s.kind] ? (general.find((b) => b !== bank) ?? null) : null;
+    return { bank, spare };
+  };
+  const loose = songs.map((s) => {
     const iss = lyrics.find((l) => l.stem === s.stem) ??
       (songs.length === 1 && lyrics.length === 1 ? lyrics[0] : null);
-    return { song: s, bank, spare, iss };
+    return { song: s, ...withBanks(s, banks.find((b) => b.stem === s.stem)), iss };
   });
+  return [...loose, ...archived.map((a) => ({ ...a, ...withBanks(a.song, a.bank) }))];
+}
+
+/**
+ * The playable songs of one IMAC (imac.js), each with its own variant's bank
+ * and lyrics, under the names META gives them. A few variants hold two songs
+ * -- an .ims and the .sop made from it -- and each is an entry. A variant with
+ * nothing this page plays (a bank alone, a .kis, an .ong) is passed over, and
+ * an IMAC that cannot be read is passed over whole rather than spoiling the
+ * rest of the drop. The bytes are copied out, so the container itself is not
+ * kept alive -- or sent to the worklet -- for the sake of one song in it.
+ */
+function imacItems(bytes, imacName) {
+  let variants;
+  try { variants = readImac(bytes); } catch { return []; }
+  const out = [];
+  for (const v of variants) {
+    const item = (id, want) => {
+      const b = v.files[id];
+      if (!b?.length) return null;
+      const kind = identify(b);
+      if (!want.includes(kind)) return null;
+      const name = imacFileName(v, id, imacName);
+      return { bytes: b.slice(), name, stem: stemOf(name), kind };
+    };
+    const bank = item("BNK ", ["bnk"]), iss = item("ISS ", ["iss"]);
+    for (const id of ["IMS ", "ROL ", "SOP "]) {
+      const song = item(id, ["ims", "rol", "sop"]);
+      if (!song) continue;
+      out.push({
+        song, bank, iss,
+        // The archive's own words for them: V000 is the base, the rest variants.
+        variant: variants.length > 1 ? (v.index === 0 ? "기본판" : `변형 ${v.index}`) : "",
+        title: v.meta?.metadata?.songname ?? "",
+      });
+    }
+  }
+  return out;
 }
 
 async function openFiles(fileList) {
   const list = await intake(fileList);
   if (!list.length) {
-    showError("재생할 수 있는 파일이 없습니다. .ims, .rol 또는 .sop 파일을 넣어 주세요.");
+    showError("재생할 수 있는 파일이 없습니다. .ims, .rol, .sop 또는 .imac 파일을 넣어 주세요.");
     return;
   }
   playlist = list;
@@ -283,7 +333,7 @@ async function playEntry(i, autoplay) {
     speed: 1,
     transpose: 0,
   });
-  els.file.textContent = entry.song.name;
+  els.file.textContent = entry.variant ? `${entry.song.name} · ${entry.variant}` : entry.song.name;
   els.index.textContent = playlist.length > 1 ? `[${i + 1} / ${playlist.length}]` : "";
   els.bank.textContent = !needsBank ? "음색 내장 (.sop)"
     : bankName ? bankName + (fallbackName ? ` → ${fallbackName}` : "") : "음색 뱅크 없음";
@@ -311,8 +361,10 @@ function showError(message) {
 
 function showSong(msg) {
   song = msg;
-  const name = playlist[current]?.song.name ?? "";
-  els.title.textContent = msg.title.trim() || name || "제목 없음";
+  const entry = playlist[current];
+  // The song's own title first, as IMPLAY showed it; an archived song that has
+  // none still has the archive's name for it before its file name.
+  els.title.textContent = msg.title.trim() || entry?.title || entry?.song.name || "제목 없음";
   els.title.parentElement.title = els.title.textContent;
   els.count.textContent = `사용 악기 ${msg.instrumentCount}개`;
   scope.mode = msg.implayStereo ? "IMPLAY 스테레오" : "";
