@@ -1,5 +1,17 @@
 @import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css");
 
+/* Three of Iyagi's own glyphs decode to the nearest Unicode has -- an emoji
+   ox for the 하늘소 logo (D480), a tiny "NL" for the boxed return arrow
+   (D4FA), emoji bubbles for the orb (D4FF).  This font draws the ISPC.FNT
+   bitmaps themselves at those code points, and unicode-range keeps it off
+   every other character.  Built by IyagiMusic.js tools/gen_ispc_font.py. */
+@font-face {
+  font-family: "Iyagi ISPC";
+  src: url("fonts/iyagi-ispc.woff2") format("woff2");
+  unicode-range: U+2424, U+1F402, U+1FAE7;
+  font-display: block;
+}
+
 /* Microtone's DIM theme: a neutral grey ground with the slate/blue cast
    dropped, so it reads as plain grey rather than as a lighter dark theme.
    The greys, the ink ramp and the amber are Microtone's own values; the key
@@ -28,8 +40,8 @@
   --hot: #ff9d7a;
   --warn: #ffb0b0;
   --warn-bg: #6b3838;
-  --mono: ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", monospace;
-  --sans: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
+  --mono: "Iyagi ISPC", ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", monospace;
+  --sans: "Iyagi ISPC", "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, Roboto, "Helvetica Neue", "Segoe UI", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", sans-serif;
   --radius: 12px;
 }
 
