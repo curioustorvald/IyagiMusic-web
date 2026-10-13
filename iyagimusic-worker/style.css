@@ -3,8 +3,8 @@
 /* Three of Iyagi's own glyphs decode to the nearest Unicode has -- an emoji
    ox for the 하늘소 logo (D480), a tiny "NL" for the boxed return arrow
    (D4FA), emoji bubbles for the orb (D4FF).  This font draws the ISPC.FNT
-   bitmaps themselves at those code points, and unicode-range keeps it off
-   every other character.  Built by IyagiMusic.js tools/gen_ispc_font.py. */
+   glyphs themselves at those code points, redrawn as outlines, and
+   unicode-range keeps it off every other character.  Built by IyagiMusic.js tools/gen_ispc_font.py. */
 @font-face {
   font-family: "Iyagi ISPC";
   src: url("fonts/iyagi-ispc.woff2") format("woff2");
