@@ -420,7 +420,10 @@ const TL_STEP_DB = 0.75;
 const LOG_UNITS_PER_DB = 256 / Math.log10(2) / 20;   // ≈ 42.52
 const ENV_TO_LOG = 8;
 const TL_TO_LOG = 32;
-const KSL_TO_LOG = 32;              // the KSL table counts in 0.75 dB too
+/** The key-scale table's unit, 0.75 dB, in log2 units. The chip itself keeps
+ *  key scaling in envelope steps (`ENV_TO_LOG`), so that settings 1 and 2
+ *  divide it exactly; this stays for anything reading the table in its own unit. */
+const KSL_TO_LOG = 32;
 
 /** Envelope generator phases. */
 const EG_OFF = 0;
@@ -1220,14 +1223,21 @@ class OplChip {
     const ch = this.channels[channelIndex];
     if (!ch) return;
     const tune = ch.pairRole === PAIR_SLAVE ? this.channels[ch.pairWith] : ch;
+    // The key scale number's low bit. The application manual (p. 13) says
+    // note-select 0 takes the F-number's second bit and 1 its MSB; the chip
+    // does the opposite, and that is what is modelled -- see "Corrected on
+    // second-hand evidence" in docs/OPL2_NOTES.en.md for whose word that is.
     const ksrValue = (tune.block << 1) |
-      ((tune.fnum >> (this.noteSelect ? 9 : 8)) & 1);
+      ((tune.fnum >> (this.noteSelect ? 8 : 9)) & 1);
     const kslBase = kslAttenuation(tune.block, tune.fnum);
     for (const op of [ch.mod, ch.car]) {
       op.phaseInc = ((tune.fnum * MULTIPLE_X2[op.multiple]) << tune.block) >> 1;
       op.ksrOffset = op.ksr ? ksrValue : ksrValue >> 2;
+      // In envelope steps, not in the table's 0.75 dB: settings 1 and 2 are
+      // then exact halves and quarters of setting 3's amount, where shifting
+      // the 0.75 dB value dropped up to 0.56 dB of it.
       const shift = KSL_SHIFT[op.ksl];
-      op.kslAtt = shift === null ? 0 : kslBase >> shift;
+      op.kslAtt = shift === null ? 0 : (kslBase << 2) >> shift;
     }
     if (ch.pairRole === PAIR_HEAD) this.#retune(ch.pairWith);
   }
@@ -1322,7 +1332,7 @@ class OplChip {
 
   /** Total attenuation of one operator this sample, in 1/256-log2 units. */
   #attenuation(op, tremolo) {
-    let att = op.env * ENV_TO_LOG + op.totalLevel * TL_TO_LOG + op.kslAtt * KSL_TO_LOG;
+    let att = (op.env + op.kslAtt) * ENV_TO_LOG + op.totalLevel * TL_TO_LOG;
     if (op.am) att += tremolo;
     return att;
   }
@@ -1683,7 +1693,7 @@ class OplChip {
 
   /** An operator's standing attenuation in dB: envelope, level and key scale. */
   #attenuationDb(op) {
-    return op.env * ENV_STEP_DB + (op.totalLevel + op.kslAtt) * TL_STEP_DB;
+    return (op.env + op.kslAtt) * ENV_STEP_DB + op.totalLevel * TL_STEP_DB;
   }
 
   /** A channel's F-number and block read back as a MIDI note, or -1 if unset. */
